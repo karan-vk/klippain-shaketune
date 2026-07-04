@@ -58,3 +58,23 @@ Follow these steps to install Shake&Tune on your printer:
      ```
 
 Don't forget to check out **[Shake&Tune documentation here](./docs/README.md)** for more details and how to use the macros or the CLI.
+
+## Native acceleration
+
+Shake&Tune ships an **optional compiled extension** (Rust, built with [PyO3](https://pyo3.rs)) that offloads its heaviest numeric work out of Python. It loads automatically when a prebuilt binary matching your board is available (`x86_64`, `aarch64`, `armv7`, `armv6`/Pi Zero), and **transparently falls back to the pure-Python implementation** otherwise — the results are identical either way, so nothing breaks on an unsupported architecture. You can force the fallback with `SHAKETUNE_DISABLE_NATIVE=1`. The binaries are cross-compiled and vendored by CI, so there is **nothing to compile on your printer**.
+
+The goal is to keep the tools usable on low-power hosts (Raspberry Pi Zero / 1 GB boards) by cutting both processing time and peak RAM. Indicative measurements on an x86&#8209;64 dev machine (Python 3.11, a synthetic 1,000,000-sample recording) — the **speedup ratios** are what transfer between machines; interpreter-bound steps generally see an even *larger* relative win on a slow SBC:
+
+| Step | Pure Python | Native | Speedup |
+|:-----|------------:|-------:|--------:|
+| Vibrations direction/speed projection (`CREATE_VIBRATIONS_PROFILE`) | ~50 s | ~10 ms | **~5000×** |
+| Spectrogram / PSD (`AXES_SHAPER_CALIBRATION`, `EXCITATE_AXIS_AT_FREQ`) | 399 ms | 32 ms | ~12× |
+| `.stdata` load (decompress + parse) | 6.1 s | 39 ms | ~155× |
+| `.stdata` save (serialize + compress) | 16.3 s | 1.5 s | ~11× |
+| Klipper input-shaper PSD (per measurement) | 69 ms | 38 ms | ~1.8× |
+
+The vibrations projection is the standout because it replaces a 432,000-iteration Python loop (720 angles × 600 speeds, each calling NumPy on scalars) with a single native call — this is the bulk of what made `CREATE_VIBRATIONS_PROFILE` take several minutes. That command benefits most overall, since it *also* runs ~200 of the per-measurement PSDs above.
+
+On memory, the in-memory accelerometer samples for a 1M-sample recording drop from **~176 MB** (a Python list of tuples) to **~32 MB** (a NumPy array) — about **5.5× less** — with a slightly smaller `.stdata` file too (compact binary vs JSON). This is the difference that keeps large recordings from exhausting RAM on 512 MB / 1 GB boards.
+
+You can reproduce these numbers with `python tests/parity/bench.py --klipper-dir <klipper>` (after `python tests/parity/gen_corpus.py --big`), and check native/Python numerical equivalence with `python tests/parity/run_parity.py --klipper-dir <klipper>`.
