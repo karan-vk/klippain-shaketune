@@ -120,6 +120,12 @@ function link_module {
     fi
 }
 
+function check_native_status {
+    # Non-fatal diagnostic: report whether the Rust/PyO3 native acceleration
+    # extension is available, without ever failing the install.
+    "${KLIPPER_VENV_PATH}/bin/python" -c "from shaketune.native import status; print('[POST-INSTALL] Native acceleration:', status())" 2>/dev/null || true
+}
+
 function add_updater {
     update_section=$(grep -c '\[update_manager[a-z ]* Klippain-ShakeTune\]' $MOONRAKER_CONFIG || true)
     if [ "$update_section" -eq 0 ]; then
@@ -162,6 +168,7 @@ check_download
 setup_venv
 link_extension
 link_module
+check_native_status
 add_updater
 restart_klipper
 restart_moonraker

@@ -18,7 +18,7 @@ import uuid
 from io import TextIOWrapper
 from multiprocessing import Process, Queue, Value
 from pathlib import Path
-from typing import List, Optional, Tuple, TypedDict
+from typing import List, Optional, Tuple, TypedDict, Union
 
 import numpy as np
 from zstandard import FLUSH_FRAME, ZstdCompressor, ZstdDecompressor
@@ -26,7 +26,7 @@ from zstandard import FLUSH_FRAME, ZstdCompressor, ZstdDecompressor
 from ..helpers.console_output import ConsoleOutput
 
 Sample = Tuple[float, float, float, float]
-SamplesList = List[Sample]
+SamplesList = Union[List[Sample], 'np.ndarray']
 
 STOP_SENTINEL = 'STOP_SENTINEL'
 WRITE_TIMEOUT = 300
@@ -62,9 +62,37 @@ class MeasurementsManager:
         self._is_writing = Value('b', False)
         self._writer_process: Optional[Process] = None
 
-    # Dedicated writer process: opens the output file in binary write mode and wraps it with a Zstandard compressor
-    # stream. It then continuously reads measurement objects from the queue and writes each as a JSON line
+    # Dedicated writer process: opens the output file and continuously reads measurement objects
+    # from the queue, writing each one to disk. When the native module is available, it writes the
+    # new compact binary ".stdata" v2 format (via the native StdataWriter); otherwise it falls back
+    # to the legacy JSON-lines format wrapped in a Zstandard compressor stream.
     def _writer_loop(self, output_file: Path, write_queue: Queue, is_writing: Value):
+        nat = None
+        try:
+            from ..native import get_native
+
+            nat = get_native()
+        except Exception:
+            nat = None
+
+        if nat is not None:
+            try:
+                writer = nat.StdataWriter(str(output_file), COMPRESSION_LEVEL)
+                while True:
+                    meas = write_queue.get()
+                    if meas == STOP_SENTINEL:
+                        break
+                    with is_writing.get_lock():
+                        is_writing.value = True
+                    writer.write_measurement(meas['name'], np.asarray(meas['samples'], dtype=np.float64))
+                    with is_writing.get_lock():
+                        is_writing.value = False
+                writer.close()
+                return
+            except Exception as e:
+                ConsoleOutput.print(f'Error writing to file {output_file} using the native writer: {e}')
+                return
+
         try:
             with open(output_file, 'wb') as f:
                 cctx = ZstdCompressor(level=COMPRESSION_LEVEL)
@@ -75,7 +103,10 @@ class MeasurementsManager:
                             break
                         with is_writing.get_lock():
                             is_writing.value = True
-                        line = (json.dumps(meas) + '\n').encode('utf-8')
+                        samples = meas['samples']
+                        if isinstance(samples, np.ndarray):
+                            samples = samples.tolist()
+                        line = (json.dumps({'name': meas['name'], 'samples': samples}) + '\n').encode('utf-8')
                         compressor.write(line)
                         with is_writing.get_lock():
                             is_writing.value = False
@@ -131,12 +162,13 @@ class MeasurementsManager:
             )
 
     # Flush all measurements except the last one (which can still receive appended samples) to the dedicated
-    # writer process. Each measurement is sent as a single JSON-serializable object via the Queue
+    # writer process. Each measurement's samples are sealed into an ndarray before being sent via the Queue
     def _flush_chunk(self):
         if len(self.measurements) <= 1:
             return
         flush_list = self.measurements[:-1]
         for meas in flush_list:
+            meas['samples'] = np.asarray(meas['samples'], dtype=np.float64)
             self._writer_queue.put(meas)
         self.clear_measurements(keep_last=True)
 
@@ -152,6 +184,7 @@ class MeasurementsManager:
         # Flush any remaining in-memory measurements
         if len(self.measurements) > 0:
             for meas in self.measurements:
+                meas['samples'] = np.asarray(meas['samples'], dtype=np.float64)
                 self._writer_queue.put(meas)
             self.clear_measurements()
 
@@ -186,6 +219,45 @@ class MeasurementsManager:
 
     # Load all the measurements from the .stdata file
     def load_from_stdata(self, filename: Path) -> List[Measurement]:
+        nat = None
+        try:
+            from ..native import get_native
+
+            nat = get_native()
+        except Exception:
+            nat = None
+
+        if nat is not None:
+            try:
+                recs = nat.read_stdata(str(filename))
+                self.measurements = [{'name': n, 'samples': s} for (n, s) in recs]
+                return self.measurements
+            except Exception:
+                pass  # fall through to the pure-Python readers below
+
+        # Sniff the file for the v2 binary magic (inside the outer Zstandard frame) to decide
+        # whether to use the pure-Python v2 reader or the legacy v1 JSON-lines reader
+        is_v2 = False
+        try:
+            with open(filename, 'rb') as f:
+                dctx = ZstdDecompressor()
+                with dctx.stream_reader(f) as decompressor:
+                    header = decompressor.read(16)
+            is_v2 = header[:8] == b'STDATAV2'
+        except Exception:
+            is_v2 = False
+
+        if is_v2:
+            try:
+                from ..native.stdata_v2 import read_stdata_v2
+
+                self.measurements = read_stdata_v2(filename)
+                return self.measurements
+            except Exception as e:
+                ConsoleOutput.print(f'Warning: unable to load measurements from {filename}: {e}')
+                self.measurements = []
+                return self.measurements
+
         measurements = []
         try:
             with open(filename, 'rb') as f:
@@ -240,7 +312,7 @@ class MeasurementsManager:
                         continue
 
                     # Add the parsed klipper raw accelerometer data to Shake&Tune measurements object
-                    samples = [tuple(row) for row in data]
+                    samples = np.asarray(data, dtype=np.float64)
                     if os.environ.get('SHAKETUNE_IN_CLI') != '1':
                         # When running as a Klipper plugin, we can use the standard add_measurement method
                         self.add_measurement(name=logname.stem, samples=samples)

@@ -26,6 +26,19 @@ def compute_spectrogram(data):
             - t: 1D array of time values for each segment
             - f: 1D array of frequency values
     """
+    nat = None
+    try:
+        from ..native import get_native
+
+        nat = get_native()
+    except Exception:
+        nat = None
+    if nat is not None:
+        try:
+            return nat.spectrogram(np.ascontiguousarray(data, dtype=np.float64))
+        except Exception:
+            pass
+
     N = data.shape[0]
     if N < 2:
         raise ValueError('Not enough data samples')

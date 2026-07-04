@@ -162,3 +162,7 @@ cython_debug/
 test/
 .vscode/
 uv.lock
+
+# Shake&Tune native (Rust/PyO3) build artifacts
+rust/target/
+shaketune/native/lib/dev/

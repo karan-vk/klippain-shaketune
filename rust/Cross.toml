@@ -1,0 +1,2 @@
+[build.env]
+passthrough = ["SHAKETUNE_RUST_TREE_HASH", "PYO3_CROSS_PYTHON_VERSION"]

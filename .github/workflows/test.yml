@@ -76,3 +76,177 @@ jobs:
       - name: run ruff tests
         run: |
           ruff check
+
+  klippy_testing_fallback:
+    # Duplicated minimal leg of klippy_testing (one repo/version combo) run
+    # with the native extension force-disabled, so the pure-Python fallback
+    # path stays covered against a real Klipper import/integration test
+    # without touching the existing klippy_testing matrix.
+    name: Klippy Tests (native disabled fallback)
+    runs-on: ubuntu-latest
+    env:
+      SHAKETUNE_DISABLE_NATIVE: '1'
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Checkout shaketune
+        uses: actions/checkout@v4
+        with:
+          path: shaketune
+      - name: Checkout Klipper
+        uses: actions/checkout@v4
+        with:
+          path: klipper
+          repository: klipper3d/klipper
+          ref: master
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gcc-avr avr-libc
+      - name: Build klipper dict
+        run: |
+          pushd klipper
+          cp ../shaketune/ci/smoke-test/klipper-smoketest.kconfig .config
+          make olddefconfig
+          make out/compile_time_request.o
+          popd
+      - name: Setup klippy env
+        run: |
+          python3 -m venv --prompt klippy klippy-env
+          ./klippy-env/bin/python -m pip install -r klipper/scripts/klippy-requirements.txt
+          ./klippy-env/bin/python -m pip install -r shaketune/requirements.txt
+      - name: Install shaketune
+        run: |
+          ln -s $PWD/shaketune/shaketune $PWD/klipper/klippy/extras/shaketune
+      - name: Klipper import test
+        run: |
+          ./klippy-env/bin/python klipper/klippy/klippy.py --import-test
+      - name: Klipper integrated test
+        run: |
+          pushd klipper
+          mkdir ../dicts
+          cp ../klipper/out/klipper.dict ../dicts/atmega2560.dict
+          ../klippy-env/bin/python scripts/test_klippy.py -d ../dicts ../shaketune/ci/smoke-test/klippy-tests/simple.test
+
+  native_sync:
+    # Guards against a stale committed binary silently shadowing a newer
+    # rust/ source tree. Passes trivially (fallback-only is a valid state)
+    # when no binaries have been committed yet, e.g. before build-native.yml
+    # has run for the first time.
+    name: Native binary / source sync check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build native crate for host
+        run: |
+          export SHAKETUNE_RUST_TREE_HASH="$(git rev-parse HEAD:rust)"
+          cargo build --release --manifest-path rust/Cargo.toml
+      - name: Verify committed x86_64 binary matches rust tree hash (if present)
+        run: |
+          if ! compgen -G "shaketune/native/lib/*/*.so" > /dev/null; then
+            echo "::notice::No committed native binaries found under shaketune/native/lib/ yet — fallback-only is a valid state, skipping sync check."
+            exit 0
+          fi
+
+          COMMITTED_SO="shaketune/native/lib/x86_64-unknown-linux-gnu/_core.abi3.so"
+          if [ ! -f "${COMMITTED_SO}" ]; then
+            echo "::error::Committed native binaries exist for other triples but ${COMMITTED_SO} is missing."
+            exit 1
+          fi
+
+          RUST_TREE_HASH="$(git rev-parse HEAD:rust)"
+          ACTUAL_HASH="$(python3 -c "import importlib.util; spec = importlib.util.spec_from_file_location('_core', '${COMMITTED_SO}'); mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); print(mod.__source_tree_hash__)")"
+          echo "Committed binary __source_tree_hash__: ${ACTUAL_HASH}"
+          echo "Current rust/ tree hash:               ${RUST_TREE_HASH}"
+          if [ "${ACTUAL_HASH}" != "${RUST_TREE_HASH}" ]; then
+            echo "::error::Committed native binary is stale: __source_tree_hash__ (${ACTUAL_HASH}) != current rust/ tree hash (${RUST_TREE_HASH}). Re-run build-native.yml."
+            exit 1
+          fi
+
+  parity:
+    # Cross-checks the Rust-native fast path against the pure-Python
+    # fallback path on identical Klipper-recorded inputs.
+    name: Native/Python parity
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout shaketune
+        uses: actions/checkout@v4
+        with:
+          path: shaketune
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Python build/runtime dependencies
+        run: pip install numpy==2.2.2 zstandard==0.23.0 maturin
+      - name: Build native extension (dev)
+        working-directory: shaketune
+        run: ./scripts/build_native_dev.sh
+      - name: Checkout Klipper
+        uses: actions/checkout@v4
+        with:
+          path: klipper
+          repository: klipper3d/klipper
+          ref: master
+      - name: Run parity suite (native enabled)
+        working-directory: shaketune
+        run: |
+          python tests/parity/run_parity.py --klipper-dir "${GITHUB_WORKSPACE}/klipper" | tee /tmp/parity-native.log
+          # Match the exact 'NATIVE ACTIVE' banner: the fallback banner is
+          # 'FALLBACK (no native)', which a case-insensitive 'NATIVE' would also match.
+          grep -q 'NATIVE ACTIVE' /tmp/parity-native.log || {
+            echo "::error::parity runner did not report engaging the native path (no 'NATIVE ACTIVE' banner found)"
+            exit 1
+          }
+      - name: Run parity suite (native disabled / fallback)
+        working-directory: shaketune
+        env:
+          SHAKETUNE_DISABLE_NATIVE: '1'
+        run: |
+          python tests/parity/run_parity.py --klipper-dir "${GITHUB_WORKSPACE}/klipper" | tee /tmp/parity-fallback.log
+          grep -Eiq 'FALLBACK' /tmp/parity-fallback.log || {
+            echo "::error::parity runner did not report using the fallback path with SHAKETUNE_DISABLE_NATIVE=1 (no FALLBACK banner found)"
+            exit 1
+          }
+
+  qemu_smoke:
+    # Emulated-arch smoke test for the committed cross-compiled binaries.
+    # Soft-fails (continue-on-error) while the native extension is new, and
+    # is a no-op until build-native.yml has actually committed binaries.
+    name: QEMU smoke (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    if: hashFiles('shaketune/native/lib/**/*.so') != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64-unknown-linux-gnu
+            image: arm64v8/python:3.11-slim-bookworm
+          - arch: armv7-unknown-linux-gnueabihf
+            image: arm32v7/python:3.9-slim-bullseye
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Import committed binary under emulation and check its embedded tree hash
+        run: |
+          # Loading the module and reading an attribute runs the extension's PyInit
+          # (native Rust code) under QEMU emulation for this arch — a genuine
+          # load-and-execute smoke test that the cross-compiled binary is valid.
+          # numpy is intentionally NOT required here (the slim arm images don't ship
+          # it), so this stays a fast, self-contained check rather than a full kernel run.
+          docker run --rm -v "${GITHUB_WORKSPACE}:/workspace" -w /workspace "${{ matrix.image }}" \
+            python -c "import importlib.util; so_path = 'shaketune/native/lib/${{ matrix.arch }}/_core.abi3.so'; spec = importlib.util.spec_from_file_location('_core', so_path); mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); print('source_tree_hash:', mod.__source_tree_hash__); print('version:', mod.__version__)"
+      - name: Also dlopen the armv6 artifact under qemu-arm (armv7 container only)
+        if: matrix.arch == 'armv7-unknown-linux-gnueabihf'
+        run: |
+          docker run --rm -v "${GITHUB_WORKSPACE}:/workspace" -w /workspace "${{ matrix.image }}" \
+            python -c "import ctypes; ctypes.CDLL('shaketune/native/lib/arm-unknown-linux-gnueabihf/_core.abi3.so'); print('armv6 artifact dlopen OK under qemu-arm')"

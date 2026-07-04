@@ -1,0 +1,138 @@
+name: 'Build native binaries'
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'rust/**'
+
+concurrency:
+  group: build-native-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build (${{ matrix.triple }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        triple:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - armv7-unknown-linux-gnueabihf
+          - arm-unknown-linux-gnueabihf
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Compute rust tree hash
+        id: hash
+        run: echo "hash=$(git rev-parse HEAD:rust)" >> "$GITHUB_OUTPUT"
+
+      - name: Build with cross
+        env:
+          SHAKETUNE_RUST_TREE_HASH: ${{ steps.hash.outputs.hash }}
+        run: |
+          # cross runs the actual build inside a container, so the host env var
+          # above only reaches the build if rust/Cross.toml declares it under
+          # [build.env] passthrough = ["SHAKETUNE_RUST_TREE_HASH"].
+          cross build --release --target ${{ matrix.triple }} --manifest-path rust/Cargo.toml
+
+      - name: Rename artifact to abi3 filename
+        run: mv "rust/target/${{ matrix.triple }}/release/lib_core.so" _core.abi3.so
+
+      - name: Verify glibc floor (<= 2.31)
+        run: |
+          MAX_GLIBC=$(objdump -T _core.abi3.so | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -V | tail -1)
+          echo "Highest required glibc symbol version: ${MAX_GLIBC:-none referenced}"
+          if [ -n "$MAX_GLIBC" ]; then
+            HIGHEST=$(printf '%s\n%s\n' "$MAX_GLIBC" "GLIBC_2.31" | sort -V | tail -1)
+            if [ "$HIGHEST" != "GLIBC_2.31" ]; then
+              echo "::error::glibc floor exceeded: binary requires ${MAX_GLIBC} (> GLIBC_2.31)"
+              exit 1
+            fi
+          fi
+
+      - name: Verify abi3 (no libpython dependency)
+        run: |
+          NEEDED="$(objdump -p _core.abi3.so | grep -i 'NEEDED' || true)"
+          echo "${NEEDED}"
+          if echo "${NEEDED}" | grep -qi 'libpython'; then
+            echo "::error::binary links against libpython; abi3 extensions must not depend on a specific CPython ABI"
+            exit 1
+          fi
+
+      - name: Verify ARMv6 baseline (arm-unknown-linux-gnueabihf only)
+        if: matrix.triple == 'arm-unknown-linux-gnueabihf'
+        run: |
+          ATTRS="$(readelf -A _core.abi3.so)"
+          echo "${ATTRS}"
+          if echo "${ATTRS}" | grep -q 'Tag_CPU_arch: v7'; then
+            echo "::error::arm-unknown-linux-gnueabihf artifact reports ARMv7 (Tag_CPU_arch: v7); expected an ARMv6 baseline build"
+            exit 1
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.triple }}
+          path: _core.abi3.so
+          if-no-files-found: error
+
+  commit:
+    name: Commit vendored binaries
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout pushed ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Download all native artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: artifacts
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Vendor native binaries into shaketune/native/lib
+        run: |
+          mkdir -p shaketune/native/lib
+          for dir in artifacts/native-*; do
+            triple="$(basename "${dir}" | sed 's/^native-//')"
+            mkdir -p "shaketune/native/lib/${triple}"
+            mv "${dir}/_core.abi3.so" "shaketune/native/lib/${triple}/_core.abi3.so"
+          done
+
+      - name: Commit and push if changed
+        run: |
+          # shaketune/native/lib/**/*.so is matched by the repo's blanket
+          # `*.so` .gitignore rule, so it must be force-added here.
+          git add -f shaketune/native/lib
+          if git diff --cached --quiet; then
+            echo "No changes to native binaries; nothing to commit."
+            exit 0
+          fi
+          RUST_TREE_HASH="$(git rev-parse HEAD:rust)"
+          git commit -m "ci: rebuild native binaries for rust tree ${RUST_TREE_HASH} [skip ci]"
+          # The committed paths (shaketune/native/lib/**) fall outside this
+          # workflow's `rust/**` path filter, and [skip ci] additionally
+          # suppresses any push-triggered workflow for this commit, so this
+          # push cannot retrigger build-native.yml.
+          git push origin "HEAD:${{ github.ref_name }}"

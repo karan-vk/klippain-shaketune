@@ -27,6 +27,19 @@ def _has_name_param_in_process_accel_data(shaper_calibrate):
     return _klipper_api_cache['has_name_param']
 
 
+def _calibration_data_has_name_param(shaper_calibrate_module):
+    """Detect whether CalibrationData.__init__ takes a leading `name` argument (Klipper master
+    after Dec 2024) vs. not (Klipper v0.13.0 and Kalico), so the native PSD path can construct the
+    real CalibrationData correctly on every fork/version instead of TypeError-ing into a fallback."""
+    if 'cal_data_has_name' not in _klipper_api_cache:
+        try:
+            sig = inspect.signature(shaper_calibrate_module.CalibrationData.__init__)
+            _klipper_api_cache['cal_data_has_name'] = 'name' in sig.parameters
+        except (ValueError, TypeError, AttributeError):
+            _klipper_api_cache['cal_data_has_name'] = False
+    return _klipper_api_cache['cal_data_has_name']
+
+
 def _normalize_find_best_shaper_result(result):
     """Normalize find_best_shaper return to (shaper, results) tuple for all Klipper versions"""
     if isinstance(result, list):
@@ -46,6 +59,35 @@ def _normalize_find_best_shaper_result(result):
 
 def process_accelerometer_data_compat(shaper_calibrate, data, name=None):
     """Call process_accelerometer_data with correct signature for the Klipper version"""
+    nat = None
+    try:
+        from ..native import get_native
+
+        nat = get_native()
+    except Exception:
+        nat = None
+
+    if nat is not None:
+        try:
+            from ..native.psd_compat import native_psd_usable
+
+            if native_psd_usable(shaper_calibrate):
+                import numpy as np
+
+                mod = sys.modules[type(shaper_calibrate).__module__]
+                fb, ps, px, py_, pz = nat.klipper_psd(np.ascontiguousarray(data, dtype=np.float64))
+                # CalibrationData gained a leading `name` arg in Klipper master (Dec 2024); v0.13.0
+                # and Kalico don't take it. Build with the signature the running fork actually has.
+                if _calibration_data_has_name_param(mod):
+                    calib = mod.CalibrationData(name, fb, ps, px, py_, pz)
+                else:
+                    calib = mod.CalibrationData(fb, ps, px, py_, pz)
+                if hasattr(calib, 'set_numpy'):
+                    calib.set_numpy(np)
+                return calib
+        except Exception:
+            pass  # fall through to Klipper's own implementation
+
     if _has_name_param_in_process_accel_data(shaper_calibrate):
         return shaper_calibrate.process_accelerometer_data(name, data)
     else:

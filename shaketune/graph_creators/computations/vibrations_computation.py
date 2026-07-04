@@ -65,7 +65,7 @@ class VibrationsComputation:
         shaper_calibrate, _ = get_shaper_calibrate_module()
 
         for measurement in self.measurements:
-            data = np.array(measurement['samples'])
+            data = np.asarray(measurement['samples'], dtype=np.float64)
             if data is None:
                 continue  # Measurement data is not in the expected format or is empty, skip it
 
@@ -268,6 +268,24 @@ class VibrationsComputation:
         """Compute directional speed spectrogram using trigonometry to project motor vibrations"""
         if measured_angles is None:
             measured_angles = [0, 90]
+
+        nat = None
+        try:
+            from ...native import get_native
+
+            nat = get_native()
+        except Exception:
+            nat = None
+        if nat is not None:
+            ms = np.asarray(measured_speeds, dtype=np.float64)
+            a0, a1 = measured_angles[0], measured_angles[1]
+            vibs_a = np.array([data[a0].get(s, 0.0) for s in measured_speeds], dtype=np.float64)
+            vibs_b = np.array([data[a1].get(s, 0.0) for s in measured_speeds], dtype=np.float64)
+            corexy = kinematics in {'corexy', 'limited_corexy'}
+            try:
+                return nat.dir_speed_spectrogram(ms, vibs_a, vibs_b, corexy)
+            except Exception:
+                pass  # fall through to the pure-Python implementation below
 
         # We want to project the motor vibrations measured on their own axes on the [0, 360] range
         spectrum_angles = np.linspace(0, 360, 720)  # One point every 0.5 degrees
