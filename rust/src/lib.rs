@@ -83,8 +83,9 @@ fn dir_speed_spectrogram<'py>(
     let a: Vec<f64> = vibs_a.as_array().iter().copied().collect();
     let b: Vec<f64> = vibs_b.as_array().iter().copied().collect();
 
-    let (angles, out_speeds, vib) =
-        py.allow_threads(move || vibrations::compute_dir_speed_spectrogram(&speeds, &a, &b, corexy));
+    let (angles, out_speeds, vib) = py
+        .allow_threads(move || vibrations::compute_dir_speed_spectrogram(&speeds, &a, &b, corexy))
+        .map_err(PyValueError::new_err)?;
 
     Ok((angles.into_pyarray(py), out_speeds.into_pyarray(py), vib.into_pyarray(py)))
 }

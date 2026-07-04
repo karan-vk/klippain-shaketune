@@ -42,7 +42,10 @@ def read_stdata_v2(path) -> List[dict]:
     while offset < buf_len:
         (name_len,) = struct.unpack_from('<I', buf, offset)
         offset += 4
-        name = buf[offset : offset + name_len].decode('utf-8')
+        name_bytes = buf[offset : offset + name_len]
+        if len(name_bytes) != name_len:
+            raise ValueError('Truncated stdata v2 stream (incomplete record name)')
+        name = name_bytes.decode('utf-8')
         offset += name_len
 
         (n_samples,) = struct.unpack_from('<Q', buf, offset)
@@ -50,9 +53,16 @@ def read_stdata_v2(path) -> List[dict]:
 
         n_bytes = n_samples * 4 * 8  # n_samples rows * 4 columns * 8 bytes per float64
         sample_bytes = buf[offset : offset + n_bytes]
+        if len(sample_bytes) != n_bytes:
+            raise ValueError(
+                f'Truncated stdata v2 stream: record {name!r} declares {n_samples} samples '
+                f'but only {len(sample_bytes)} of {n_bytes} bytes are present'
+            )
         offset += n_bytes
 
-        samples = np.frombuffer(sample_bytes, dtype='<f8').reshape(-1, 4)
+        # bytearray() makes the resulting array writable (np.frombuffer on bytes yields a
+        # read-only array, unlike the native reader which always returns writable arrays)
+        samples = np.frombuffer(bytearray(sample_bytes), dtype='<f8').reshape(n_samples, 4)
         records.append({'name': name, 'samples': samples})
 
     return records

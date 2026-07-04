@@ -276,7 +276,16 @@ class VibrationsComputation:
             nat = get_native()
         except Exception:
             nat = None
-        if nat is not None:
+        # Only dispatch to the native kernel for the kinematics the pure-Python loop below
+        # explicitly handles (an unknown value must keep its original failure mode)
+        if nat is not None and kinematics in {
+            'cartesian',
+            'limited_cartesian',
+            'corexz',
+            'limited_corexz',
+            'corexy',
+            'limited_corexy',
+        }:
             ms = np.asarray(measured_speeds, dtype=np.float64)
             a0, a1 = measured_angles[0], measured_angles[1]
             vibs_a = np.array([data[a0].get(s, 0.0) for s in measured_speeds], dtype=np.float64)

@@ -27,15 +27,18 @@ from ..helpers.console_output import ConsoleOutput
 # list only ever needs *adding* to; it never causes wrong results. New versions are verified and
 # appended here (the parity test prints the digest of any checkout it runs against).
 ALLOWLIST = {
-    'a74ab85405fcdd9eb767a7d4ecd1b8b5112a572eba6fca2c0e461b8539724ed3',  # klipper3d/klipper master (2026-07)
-    '5f2abd6ce69a48debb74474130be9505fcfc0f022b4a40814d6cf540c6802563',  # klipper3d/klipper v0.13.0
-    'bcd814828f11fe17a0a79f069bd2c8c63036a7ed46a38a957206d20808ee9e74',  # KalicoCrew/kalico master (2026-07)
+    'c8ba325e96eaf84eb736f9b44777b9e6eb7521274466803e5df8d8b134ae8864',  # klipper3d/klipper master (2026-07)
+    'f6e4127778480359e42e31fb64ac474ac841d0f530df387be420b221f81a2bab',  # klipper3d/klipper v0.13.0
+    '825f3a8db6785ff50465ef38cd287bc61cf9b8e6f65e14b9e3bd51a7142468e7',  # KalicoCrew/kalico master (2026-07)
 }
 
 # Cache of digest -> usable bool, so repeated calls with the same source don't re-hash/re-log.
 _digest_cache = {}
 
-_PSD_ATTRS = ('_psd', 'calc_freq_response')
+# _split_into_windows is included because _psd delegates its segmentation to it: a fork that
+# changes only the windowing (overlap, step, count) would otherwise keep an unchanged _psd
+# source and silently pass the digest check while computing different math.
+_PSD_ATTRS = ('_split_into_windows', '_psd', 'calc_freq_response')
 _CALIBRATION_DATA_ATTRS = ('__init__',)
 
 

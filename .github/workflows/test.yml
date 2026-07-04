@@ -195,10 +195,13 @@ jobs:
           path: klipper
           repository: klipper3d/klipper
           ref: master
+      - name: Generate parity corpus
+        working-directory: shaketune
+        run: python tests/parity/gen_corpus.py --big
       - name: Run parity suite (native enabled)
         working-directory: shaketune
         run: |
-          python tests/parity/run_parity.py --klipper-dir "${GITHUB_WORKSPACE}/klipper" | tee /tmp/parity-native.log
+          python tests/parity/run_parity.py --klipper-dir "${GITHUB_WORKSPACE}/klipper" --big | tee /tmp/parity-native.log
           # Match the exact 'NATIVE ACTIVE' banner: the fallback banner is
           # 'FALLBACK (no native)', which a case-insensitive 'NATIVE' would also match.
           grep -q 'NATIVE ACTIVE' /tmp/parity-native.log || {

@@ -9,6 +9,9 @@ use numpy::ndarray::{Array1, Array2};
 
 const N_ANGLES: usize = 720;
 
+/// Result triple of [`compute_dir_speed_spectrogram`]: (angles, speeds, vibrations matrix).
+pub type DirSpeedSpectrogram = (Array1<f64>, Array1<f64>, Array2<f64>);
+
 /// numpy-compatible linspace: `step = (b - a) / (n - 1)`, `out[i] = a + i*step` for `i < n-1`,
 /// and `out[n-1] = b` exactly (avoids floating point drift on the last element).
 fn linspace(a: f64, b: f64, n: usize) -> Vec<f64> {
@@ -54,8 +57,15 @@ pub fn compute_dir_speed_spectrogram(
     vibs_a: &[f64],
     vibs_b: &[f64],
     corexy: bool,
-) -> (Array1<f64>, Array1<f64>, Array2<f64>) {
+) -> Result<DirSpeedSpectrogram, String> {
     let m = measured_speeds.len();
+    // Fewer than 2 measured speeds cannot be interpolated (the pure-Python original degenerates
+    // to an all-NaN result for m == 1 and raises for m == 0). Error out so the dispatch site
+    // falls back to the pure-Python implementation, preserving the original behaviour exactly
+    // instead of panicking on the clamp below.
+    if m < 2 {
+        return Err(format!("need at least 2 measured speeds for interpolation, got {m}"));
+    }
     let n_speeds = m * 6;
 
     let spectrum_angles = linspace(0.0, 360.0, N_ANGLES);
@@ -90,11 +100,11 @@ pub fn compute_dir_speed_spectrogram(
         }
     }
 
-    (
+    Ok((
         Array1::from_vec(spectrum_angles),
         Array1::from_vec(spectrum_speeds),
         spectrum_vibrations,
-    )
+    ))
 }
 
 #[cfg(test)]
@@ -144,9 +154,18 @@ mod tests {
         let speeds = vec![10.0, 20.0, 30.0, 40.0];
         let vibs_a = vec![0.1, 0.2, 0.3, 0.1];
         let vibs_b = vec![0.2, 0.1, 0.2, 0.3];
-        let (angles, out_speeds, vib) = compute_dir_speed_spectrogram(&speeds, &vibs_a, &vibs_b, false);
+        let (angles, out_speeds, vib) =
+            compute_dir_speed_spectrogram(&speeds, &vibs_a, &vibs_b, false).unwrap();
         assert_eq!(angles.len(), 720);
         assert_eq!(out_speeds.len(), speeds.len() * 6);
         assert_eq!(vib.shape(), &[720, speeds.len() * 6]);
+    }
+
+    #[test]
+    fn fewer_than_two_speeds_errors_instead_of_panicking() {
+        // m == 1 used to hit `.clamp(1, 0)` (a panic); it must now surface as an Err so the
+        // Python dispatch site falls back to the original implementation.
+        assert!(compute_dir_speed_spectrogram(&[100.0], &[1.0], &[1.0], false).is_err());
+        assert!(compute_dir_speed_spectrogram(&[], &[], &[], true).is_err());
     }
 }

@@ -84,7 +84,10 @@ class MeasurementsManager:
                         break
                     with is_writing.get_lock():
                         is_writing.value = True
-                    writer.write_measurement(meas['name'], np.asarray(meas['samples'], dtype=np.float64))
+                    # reshape(-1, 4) guards the (0,)-shaped empty-measurement case: the native
+                    # writer requires a 2-D array and a TypeError here would kill the writer
+                    # process, silently losing every measurement queued after it
+                    writer.write_measurement(meas['name'], np.asarray(meas['samples'], dtype=np.float64).reshape(-1, 4))
                     with is_writing.get_lock():
                         is_writing.value = False
                 writer.close()
@@ -168,7 +171,9 @@ class MeasurementsManager:
             return
         flush_list = self.measurements[:-1]
         for meas in flush_list:
-            meas['samples'] = np.asarray(meas['samples'], dtype=np.float64)
+            # reshape(-1, 4) is a free view for well-formed data, but seals a zero-sample
+            # measurement as (0, 4) instead of (0,) so the native writer accepts it
+            meas['samples'] = np.asarray(meas['samples'], dtype=np.float64).reshape(-1, 4)
             self._writer_queue.put(meas)
         self.clear_measurements(keep_last=True)
 
@@ -184,7 +189,8 @@ class MeasurementsManager:
         # Flush any remaining in-memory measurements
         if len(self.measurements) > 0:
             for meas in self.measurements:
-                meas['samples'] = np.asarray(meas['samples'], dtype=np.float64)
+                # reshape(-1, 4): see _flush_chunk (seals empty measurements as (0, 4))
+                meas['samples'] = np.asarray(meas['samples'], dtype=np.float64).reshape(-1, 4)
                 self._writer_queue.put(meas)
             self.clear_measurements()
 

@@ -91,6 +91,11 @@ class Results:
     def failed(self):
         return any(status == 'FAIL' for _, status, _ in self.rows)
 
+    def nothing_passed(self):
+        """True when not a single check actually ran (e.g. missing corpus -> all SKIP). An
+        all-SKIP run proves nothing and must not be reported as SUCCESS, especially in CI."""
+        return not any(status == 'PASS' for _, status, _ in self.rows)
+
 
 def _first_line(exc: Exception) -> str:
     """First non-blank line of an exception's message (np.testing.assert_* messages often start
@@ -569,6 +574,10 @@ def main():
 
     if results.failed():
         print('\nRESULT: FAILURE')
+        sys.exit(1)
+
+    if results.nothing_passed():
+        print('\nRESULT: FAILURE (all checks were skipped — nothing was actually verified)')
         sys.exit(1)
 
     print('\nRESULT: SUCCESS (see SKIP rows above for anything not exercised)')

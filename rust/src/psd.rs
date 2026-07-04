@@ -25,10 +25,19 @@ pub fn compute_klipper_psd(data: ArrayView2<f64>) -> Result<KlipperPsdResult, St
     if n < 2 {
         return Err("data too short for klipper psd".to_string());
     }
+    if data.ncols() < 4 {
+        return Err(format!("expected (N, 4) [t, x, y, z] data, got {} columns", data.ncols()));
+    }
 
     let t0 = data[[0, 0]];
     let t_last = data[[n - 1, 0]];
     let fs = n as f64 / (t_last - t0);
+    // NaN or non-positive Fs (NaN / non-monotonic timestamps) must not be computed on: Klipper's
+    // own Python math behaves very differently on such degenerate input. Error out so the
+    // dispatch site falls back to Klipper's implementation, preserving its exact behaviour.
+    if !fs.is_finite() || fs <= 0.0 {
+        return Err(format!("invalid sampling frequency derived from timestamps: {fs}"));
+    }
 
     let m = next_pow2_from_truncated(fs * 0.5 - 1.0);
     if n <= m {
@@ -39,7 +48,12 @@ pub fn compute_klipper_psd(data: ArrayView2<f64>) -> Result<KlipperPsdResult, St
     let n_freqs = plan.n_freqs;
     let n_segments = plan.n_segments;
 
-    let freqs = Array1::from_shape_fn(n_freqs, |j| (j as f64) * fs / (m as f64));
+    // Mirror np.fft.rfftfreq(m, 1. / fs) bit-for-bit: numpy first rounds d = 1/fs,
+    // then computes val = 1/(m*d) and scales the integer bin index by it. Computing
+    // j * fs / m directly rounds differently on some bins (1-ulp drift).
+    let d = 1.0 / fs;
+    let val = 1.0 / (m as f64 * d);
+    let freqs = Array1::from_shape_fn(n_freqs, |j| (j as f64) * val);
 
     let mean_psd_for_axis = |axis_idx: usize| -> Array1<f64> {
         let column: Vec<f64> = data.column(axis_idx).iter().copied().collect();

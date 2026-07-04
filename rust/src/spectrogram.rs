@@ -18,10 +18,19 @@ pub fn compute_spectrogram(data: ArrayView2<f64>) -> Result<SpectrogramOutput, S
     if n < 2 {
         return Err("Not enough data samples".to_string());
     }
+    if data.ncols() < 4 {
+        return Err(format!("expected (N, 4) [t, x, y, z] data, got {} columns", data.ncols()));
+    }
 
     let t0 = data[[0, 0]];
     let t_last = data[[n - 1, 0]];
     let fs = n as f64 / (t_last - t0);
+    // NaN or non-positive Fs (NaN / non-monotonic timestamps) must not be computed on: the
+    // pure-Python original either raises or produces a very different degenerate result here.
+    // Error out so the dispatch site falls back to it, preserving the original behaviour.
+    if !fs.is_finite() || fs <= 0.0 {
+        return Err(format!("invalid sampling frequency derived from timestamps: {fs}"));
+    }
 
     let nperseg = next_pow2_from_truncated(0.5 * fs - 1.0);
     if n < nperseg {
@@ -35,7 +44,12 @@ pub fn compute_spectrogram(data: ArrayView2<f64>) -> Result<SpectrogramOutput, S
 
     // Time and frequency arrays.
     let t = Array1::from_shape_fn(n_segments, |i| (i as f64) * (step as f64) / fs + (nperseg as f64) / (2.0 * fs));
-    let f = Array1::from_shape_fn(n_freqs, |j| (j as f64) * fs / (nperseg as f64));
+    // Mirror np.fft.rfftfreq(nperseg, 1 / Fs) bit-for-bit: numpy first rounds d = 1/Fs,
+    // then computes val = 1/(nperseg*d) and scales the integer bin index by it. Computing
+    // j * fs / nperseg directly rounds differently on some bins (1-ulp drift).
+    let d = 1.0 / fs;
+    let val = 1.0 / (nperseg as f64 * d);
+    let f = Array1::from_shape_fn(n_freqs, |j| (j as f64) * val);
 
     let mut pdata = Array2::<f64>::zeros((n_freqs, n_segments));
 
