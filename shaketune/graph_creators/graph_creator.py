@@ -58,13 +58,22 @@ class GraphCreator(abc.ABC):
         pass
 
     def create_graph(self, measurements_manager: MeasurementsManager) -> None:
-        """Create and save the graph"""
+        """Create and save the graph. This pipeline is fixed and not meant to be overridden;
+        subclasses that need extra post-processing (e.g. persisting a baseline) hook in via
+        _after_save() rather than reimplementing the pipeline."""
         computation = self._create_computation(measurements_manager)
         result = computation.compute()
         fig = self._plotter.plot(result)
         self._save_figure(fig)
         if self.writes_history:
             self._save_summary(result)
+        self._after_save(result)
+
+    def _after_save(self, result) -> None:  # noqa: B027 (intentional concrete no-op hook, not abstract)
+        """Extension hook run at the very end of create_graph(), after the figure and summary have
+        been saved. No-op by default; subclasses may override to add post-processing without
+        touching the fixed create_graph() pipeline."""
+        pass
 
     def _save_summary(self, result) -> None:
         """Persist the computation result's JSON-safe summary next to the output file and

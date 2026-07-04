@@ -44,16 +44,10 @@ class HealthCheckGraphCreator(GraphCreator):
             st_version=self._version,
         )
 
-    def create_graph(self, measurements_manager: MeasurementsManager) -> None:
-        """Create and save the graph, then (MODE=BASELINE only) persist the freshly-measured
-        per-axis PSDs as the new baseline for future MODE=CHECK comparisons"""
-        computation = self._create_computation(measurements_manager)
-        result = computation.compute()
-        fig = self._plotter.plot(result)
-        self._save_figure(fig)
-        if self.writes_history:
-            self._save_summary(result)
-
+    def _after_save(self, result) -> None:
+        """MODE=BASELINE only: persist the freshly-measured per-axis PSDs as the new baseline for
+        future MODE=CHECK comparisons. Hooks into the base create_graph() pipeline (run after the
+        figure and history summary are saved) rather than overriding the pipeline itself."""
         if self._mode == 'baseline':
             baseline_record = {
                 'ts': datetime.now().isoformat(timespec='seconds'),

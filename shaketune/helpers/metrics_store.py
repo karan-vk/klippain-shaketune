@@ -12,6 +12,8 @@
 #              failure must not fail a graph.
 
 import json
+import math
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -23,10 +25,14 @@ HISTORY_FILENAME = 'history.jsonl'
 
 def json_sanitize(obj: Any) -> Any:
     """Best-effort recursive conversion of obj into native JSON-safe types. Never raises:
-    anything that can't be handled is coerced to its string representation (or None)"""
+    anything that can't be handled is coerced to its string representation (or None). Non-finite
+    floats (NaN/inf, incl. numpy float64 which subclasses float) become None, since json.dumps
+    would otherwise emit the invalid JSON tokens NaN/Infinity that strict parsers reject."""
     try:
-        if obj is None or isinstance(obj, (bool, int, float, str)):
+        if obj is None or isinstance(obj, (bool, int, str)):
             return obj
+        if isinstance(obj, float):
+            return obj if math.isfinite(obj) else None
         if isinstance(obj, dict):
             return {str(key): json_sanitize(value) for key, value in obj.items()}
         if isinstance(obj, (list, tuple, set)):
@@ -61,7 +67,13 @@ def write_run_artifacts(output_target: Path, st_config, graph_type: str, summary
         with open(output_target.with_suffix('.json'), 'w') as f:
             json.dump(record, f, indent=2)
 
-        history_file = history_path(st_config)
+        # In CLI mode keep the history next to the output file instead of appending to the printer's
+        # real results-folder history: CLI runs (often on a laptop, on arbitrary recorded data)
+        # should not pollute a live printer's trend history.
+        if os.environ.get('SHAKETUNE_IN_CLI') == '1':
+            history_file = output_target.parent / HISTORY_FILENAME
+        else:
+            history_file = history_path(st_config)
         history_file.parent.mkdir(parents=True, exist_ok=True)
         # A single f.write() below PIPE_BUF is an atomic append: no locking needed since only
         # one Shake&Tune graph subprocess ever runs at a time and the parent only reads the

@@ -83,70 +83,81 @@ def healthcheck(gcmd, klipper_config, st_process: ShakeTuneProcess) -> None:
             z = z_height
         point = (x, y, z)
 
-    # set the needed acceleration values for the test
+    # Read and save the current acceleration limits so they can be restored later
     toolhead_info = toolhead.get_status(systime)
     old_accel = toolhead_info['max_accel']
-    if 'minimum_cruise_ratio' in toolhead_info:  # minimum_cruise_ratio found: Klipper >= v0.12.0-239
-        old_mcr = toolhead_info['minimum_cruise_ratio']
-        gcode.run_script_from_command(f'SET_VELOCITY_LIMIT ACCEL={max_accel} MINIMUM_CRUISE_RATIO=0')
-    else:  # minimum_cruise_ratio not found: Klipper < v0.12.0-239
-        old_mcr = None
-        gcode.run_script_from_command(f'SET_VELOCITY_LIMIT ACCEL={max_accel}')
+    old_mcr = toolhead_info.get('minimum_cruise_ratio')  # None on Klipper < v0.12.0-239
 
-    # Deactivate input shaper if it is active to get raw movements
     input_shaper = printer.lookup_object('input_shaper', None)
-    if input_shaper is not None:
-        input_shaper.disable_shaping()
-    else:
-        input_shaper = None
-
     creator = st_process.get_graph_creator()
     filename = creator.get_folder() / f'{creator.get_type()}_{date}'
     measurements_manager = MeasurementsManager(st_process.get_st_config().chunk_size, printer.get_reactor(), filename)
-
-    # Run the quick sweep for each axis, into one shared measurements file (like COMPARE_BELTS_RESPONSES)
     filtered_config = [a for a in AXIS_CONFIG if a['axis'] in ('x', 'y')]
-    for config in filtered_config:
-        toolhead.manual_move(point, feedrate_travel)
-        toolhead.dwell(0.5)
-        toolhead.wait_moves()
 
-        # First we need to find the accelerometer chip suited for the axis (if not provided by the user)
-        current_accel_chip = accel_chip  # Use manually specified chip if provided
-        if current_accel_chip is None:
-            current_accel_chip = Accelerometer.find_axis_accelerometer(printer, config['axis'])
-        if current_accel_chip is None:
-            raise gcmd.error('No suitable accelerometer found for measurement!')
-        k_accelerometer = printer.lookup_object(current_accel_chip, None)
-        if k_accelerometer is None:
-            raise gcmd.error(f'Accelerometer chip "{current_accel_chip}" not found!')
-        accelerometer = Accelerometer(k_accelerometer, printer.get_reactor())
+    # Everything that mutates machine state (velocity limits, input shaping) is wrapped so it is
+    # always restored in the finally block, even if a measurement raises mid-run
+    try:
+        # Set the acceleration values needed for the test
+        if old_mcr is not None:
+            gcode.run_script_from_command(f'SET_VELOCITY_LIMIT ACCEL={max_accel} MINIMUM_CRUISE_RATIO=0')
+        else:
+            gcode.run_script_from_command(f'SET_VELOCITY_LIMIT ACCEL={max_accel}')
 
-        ConsoleOutput.print(f'Measuring {config["label"]}...')
-        accelerometer.start_recording(measurements_manager, name=config['label'], append_time=True)
-        vibrate_axis(
-            toolhead,
-            gcode,
-            config['direction'],
-            min_freq,
-            max_freq,
-            hz_per_sec,
-            accel_per_hz,
-            res_tester,
-            klipper_config,
-        )
-        accelerometer.stop_recording()
-        toolhead.dwell(0.5)
-        toolhead.wait_moves()
+        # Deactivate input shaper if it is active to get raw movements
+        if input_shaper is not None:
+            input_shaper.disable_shaping()
 
-    # Run post-processing: a single combined graph (and history entry) for both axes
-    ConsoleOutput.print('Healthcheck frequency profile generation...')
-    creator.configure(mode=mode)
-    creator.define_output_target(filename)
-    measurements_manager.save_stdata()
-    st_process.run(filename)
-    st_process.wait_for_completion()
+        # Run the quick sweep for each axis, into one shared measurements file (like COMPARE_BELTS_RESPONSES)
+        for config in filtered_config:
+            toolhead.manual_move(point, feedrate_travel)
+            toolhead.dwell(0.5)
+            toolhead.wait_moves()
 
+            # First we need to find the accelerometer chip suited for the axis (if not provided by the user)
+            current_accel_chip = accel_chip  # Use manually specified chip if provided
+            if current_accel_chip is None:
+                current_accel_chip = Accelerometer.find_axis_accelerometer(printer, config['axis'])
+            if current_accel_chip is None:
+                raise gcmd.error('No suitable accelerometer found for measurement!')
+            k_accelerometer = printer.lookup_object(current_accel_chip, None)
+            if k_accelerometer is None:
+                raise gcmd.error(f'Accelerometer chip "{current_accel_chip}" not found!')
+            accelerometer = Accelerometer(k_accelerometer, printer.get_reactor())
+
+            ConsoleOutput.print(f'Measuring {config["label"]}...')
+            accelerometer.start_recording(measurements_manager, name=config['label'], append_time=True)
+            vibrate_axis(
+                toolhead,
+                gcode,
+                config['direction'],
+                min_freq,
+                max_freq,
+                hz_per_sec,
+                accel_per_hz,
+                res_tester,
+                klipper_config,
+            )
+            accelerometer.stop_recording()
+            toolhead.dwell(0.5)
+            toolhead.wait_moves()
+
+        # Run post-processing: a single combined graph (and history entry) for both axes
+        ConsoleOutput.print('Healthcheck frequency profile generation...')
+        creator.configure(mode=mode)
+        creator.define_output_target(filename)
+        measurements_manager.save_stdata()
+        st_process.run(filename)
+        st_process.wait_for_completion()
+    finally:
+        # Always restore the machine state, even if a measurement above raised
+        if input_shaper is not None:
+            input_shaper.enable_shaping()
+        if old_mcr is not None:
+            gcode.run_script_from_command(f'SET_VELOCITY_LIMIT ACCEL={old_accel} MINIMUM_CRUISE_RATIO={old_mcr}')
+        else:
+            gcode.run_script_from_command(f'SET_VELOCITY_LIMIT ACCEL={old_accel}')
+
+    # Success path only (skipped if the sweep raised): read the result and print the verdict
     current = metrics_store.read_current_summary(filename)
     if mode == 'baseline':
         ConsoleOutput.print('Healthcheck baseline captured.')
@@ -156,13 +167,3 @@ def healthcheck(gcmd, klipper_config, st_process: ShakeTuneProcess) -> None:
         for line in lines:
             ConsoleOutput.print(line)
         ConsoleOutput.print(f'Healthcheck result: {status}')
-
-    # Re-enable the input shaper if it was active
-    if input_shaper is not None:
-        input_shaper.enable_shaping()
-
-    # Restore the previous acceleration values
-    if old_mcr is not None:  # minimum_cruise_ratio found: Klipper >= v0.12.0-239
-        gcode.run_script_from_command(f'SET_VELOCITY_LIMIT ACCEL={old_accel} MINIMUM_CRUISE_RATIO={old_mcr}')
-    else:  # minimum_cruise_ratio not found: Klipper < v0.12.0-239
-        gcode.run_script_from_command(f'SET_VELOCITY_LIMIT ACCEL={old_accel}')

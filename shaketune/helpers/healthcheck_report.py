@@ -24,6 +24,10 @@ BASELINE_FILENAME = 'baseline_healthcheck.json'
 # needed) the computation stay in sync.
 THRESHOLD_FR_WARN_HZ = 3.0  # Absolute resonant frequency drift that warrants a WARN
 THRESHOLD_ZETA_WARN_REL = 0.30  # Relative damping ratio drift (|Δζ|/ζ_baseline) that warrants a WARN
+# The half-power-bandwidth zeta estimate is numerically noisy at the small values (~0.01-0.05)
+# typical of 3D printers, so a relative-only bar fires spuriously; also require a meaningful ABSOLUTE
+# change before warning on damping.
+THRESHOLD_ZETA_WARN_ABS = 0.02
 THRESHOLD_NEW_PEAK_MIN_REL_AMP = 0.2  # Minimum relative amplitude for a new peak to be worth flagging
 NEW_PEAK_PROXIMITY_HZ = 3.0  # A current peak within this distance of a baseline peak isn't "new"
 
@@ -92,24 +96,31 @@ def _compare_axis(axis: str, current: Dict[str, Any], baseline: Dict[str, Any]) 
     lines: List[str] = []
     warned = False
 
+    fr_warned = False
     fr_cur, fr_base = current.get('fr'), baseline.get('fr')
     if fr_cur is not None and fr_base is not None:
         delta_fr = fr_cur - fr_base
         if abs(delta_fr) > THRESHOLD_FR_WARN_HZ:
             warned = True
+            fr_warned = True
             lines.append(
                 f'WARN [{axis}]: resonant frequency shifted {delta_fr:+.1f} Hz '
                 f'({fr_base:.1f} Hz -> {fr_cur:.1f} Hz) -- check belt tension / mechanical wear'
             )
 
+    # Only flag a damping change when it's both a large RELATIVE and a meaningful ABSOLUTE move, and
+    # not when this axis already warned on frequency (the zeta estimate wobbles along with an fr
+    # shift, so reporting it too would just be a noisy second line for the same root cause).
     zeta_cur, zeta_base = current.get('zeta'), baseline.get('zeta')
-    if zeta_cur is not None and zeta_base is not None and zeta_base > 0:
-        delta_zeta_rel = abs(zeta_cur - zeta_base) / zeta_base
-        if delta_zeta_rel > THRESHOLD_ZETA_WARN_REL:
+    if not fr_warned and zeta_cur is not None and zeta_base is not None and zeta_base > 0:
+        delta_zeta = zeta_cur - zeta_base
+        delta_zeta_rel = abs(delta_zeta) / zeta_base
+        if delta_zeta_rel > THRESHOLD_ZETA_WARN_REL and abs(delta_zeta) > THRESHOLD_ZETA_WARN_ABS:
             warned = True
+            direction = 'increased' if delta_zeta > 0 else 'decreased'
             lines.append(
-                f'WARN [{axis}]: damping ratio changed by {delta_zeta_rel * 100:.0f}% '
-                f'({zeta_base:.3f} -> {zeta_cur:.3f}) -- check for loose or worn mechanical components'
+                f'WARN [{axis}]: damping ratio {direction} by {delta_zeta_rel * 100:.0f}% '
+                f'({zeta_base:.3f} -> {zeta_cur:.3f}) -- check for changes in mechanical friction/damping'
             )
 
     new_peaks = _find_new_peaks(current.get('peak_freqs'), baseline.get('peak_freqs'))

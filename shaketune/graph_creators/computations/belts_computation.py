@@ -287,7 +287,21 @@ class BeltsComputation:
                 'looser_belt': None,
             }
 
-        main_pair = max(paired, key=lambda p: (p[0][2] + p[1][2]) / 2.0)
+        # The belt-tension resonance is each belt's own DOMINANT (highest-amplitude) peak. Anchor the
+        # comparison on the paired peak nearest both belts' dominant peaks, rather than on whichever
+        # pair is loudest overall -- otherwise a loud shared frame/gantry resonance or a harmonic
+        # could hijack the estimate and accuse the wrong belt (or flip the severity band). Falls back
+        # to combined amplitude when a belt's dominant peak can't be determined.
+        def _dominant_freq(signal: SignalData) -> Optional[float]:
+            if signal.peaks is None or len(signal.peaks) == 0:
+                return None
+            return float(signal.freqs[max(signal.peaks, key=lambda idx: signal.psd[idx])])
+
+        dom1, dom2 = _dominant_freq(signal1), _dominant_freq(signal2)
+        if dom1 is not None and dom2 is not None:
+            main_pair = min(paired, key=lambda p: abs(p[0][1] - dom1) + abs(p[1][1] - dom2))
+        else:
+            main_pair = max(paired, key=lambda p: (p[0][2] + p[1][2]) / 2.0)
         f1, amp1 = main_pair[0][1], main_pair[0][2]
         f2, amp2 = main_pair[1][1], main_pair[1][2]
         delta_f = abs(f1 - f2)

@@ -28,17 +28,27 @@ SPEEDS_VALLEY_DETECTION_THRESHOLD = 0.7  # Lower is more sensitive
 SPEEDS_AROUND_PEAK_DELETION = 3  # to delete +-3mm/s around a peak
 ANGLES_VALLEY_DETECTION_THRESHOLD = 1.1  # Lower is more sensitive
 
-# Directional speed spectrogram grid resolution. This is the single source of truth for both the
-# native (Rust) and pure-Python code paths: it's passed through the FFI on every native call so a
-# stale native binary (built against an older, hardcoded grid) can never silently produce a
-# differently-shaped result than the Python fallback -- an old 4-arg binary simply raises
-# TypeError, which the existing dispatch `except Exception` already routes to the Python fallback
-# computed at THIS (new) resolution.
+# Directional speed spectrogram grid resolution. (N_ANGLES, SPEED_OVERSAMPLING) is the finer grid
+# used when the compiled native kernel is available; (_REFERENCE_N_ANGLES, _REFERENCE_SPEED_OVERSAMPLING)
+# is the original grid used as a fallback. `_resolve_grid()` selects between them per run: the finer
+# grid is only used with native acceleration, because the pure-Python projection is
+# O(n_angles * m * speed_oversampling) and the finer grid would be ~4x slower on a host without
+# native (e.g. a Pi Zero whose prebuilt binary is missing/stale) -- there we keep the original grid
+# so performance is unchanged.
 #
-# All index-unit smoothing windows below (_compute_angle_powers, _compute_speed_powers,
-# detect_peaks) are then rescaled by the exact ratio of new/old index counts so that the PHYSICAL
-# smoothing width (in degrees or mm/s) stays exactly the same as before: same smoothing physics,
-# same detected peak count -- only the zone boundaries get reported at finer granularity.
+# The chosen grid is passed through the FFI on every native call, so a stale native binary (built
+# against an older, hardcoded grid) can never silently produce a differently-shaped result than the
+# Python fallback: an old 4-arg binary raises TypeError, which the dispatch `except Exception`
+# routes to the Python fallback at the same grid (and a stale binary also fails the loader's
+# tree-hash check, so `_resolve_grid` then picks the reference grid anyway).
+#
+# All index-unit smoothing windows below (_compute_angle_powers, _compute_speed_powers, detect_peaks)
+# are rescaled by the exact ratio of new/old index counts so their PHYSICAL smoothing width (in
+# degrees or mm/s) is preserved. At the reference grid the ratio is exactly 1.0 (bit-identical to the
+# original hardcoded windows). At the finer grid the physics is preserved to within one grid step:
+# for well-separated peaks the detected-peak COUNT is unchanged; a borderline shoulder sitting right
+# on the detection threshold can differ by one (the finer grid errs toward MERGING it, i.e. reporting
+# fewer peaks -- it never invents new peaks), so higher resolution does not add spurious peaks.
 N_ANGLES = 1440
 SPEED_OVERSAMPLING = 12
 _REFERENCE_N_ANGLES = 720
@@ -51,26 +61,31 @@ STEALTHCHOP_RANGE_MARGIN_FRACTION = 0.10  # transition must sit >=10% of the tes
 
 
 def _round_to_odd(x: float) -> int:
-    """Round to the nearest integer, then bump up to the next odd number if needed (convolution
-    kernels and padding widths need an odd size to stay centered)"""
+    """Round x to the NEAREST odd integer (>=1). Convolution kernels and padding widths need an odd
+    size to stay centered; picking the nearest odd number (rather than always rounding up) keeps the
+    physical smoothing width as close as possible to the ideal, minimizing any resolution-dependent
+    drift in which borderline peaks survive detection."""
     n = max(1, int(round(x)))
-    return n if n % 2 == 1 else n + 1
+    if n % 2 == 1:
+        return n
+    lower, upper = n - 1, n + 1
+    if lower < 1:
+        return upper
+    return lower if abs(x - lower) <= abs(x - upper) else upper
 
 
-def _angle_window_ratio() -> float:
-    """Ratio of new/old angle index counts, used to rescale angle-domain smoothing windows so
-    their PHYSICAL (degrees) width stays constant regardless of N_ANGLES. Reads the module
-    globals at call time (rather than capturing them at import time) so tests can monkeypatch
-    N_ANGLES/_REFERENCE_N_ANGLES."""
-    return (N_ANGLES - 1) / (_REFERENCE_N_ANGLES - 1)
+def _angle_window_ratio(n_angles: int) -> float:
+    """Ratio of the given/reference angle index counts, used to rescale angle-domain smoothing
+    windows so their PHYSICAL (degrees) width stays constant regardless of the grid resolution."""
+    return (n_angles - 1) / (_REFERENCE_N_ANGLES - 1)
 
 
-def _speed_window_ratio(m: int) -> float:
-    """Ratio of new/old speed index counts for a test with `m` measured speeds, used to rescale
-    speed-domain smoothing windows so their PHYSICAL (mm/s) width stays constant regardless of
-    SPEED_OVERSAMPLING. Reads the module globals at call time so tests can monkeypatch them."""
+def _speed_window_ratio(m: int, speed_oversampling: int) -> float:
+    """Ratio of the given/reference speed index counts for a test with `m` measured speeds, used to
+    rescale speed-domain smoothing windows so their PHYSICAL (mm/s) width stays constant regardless
+    of the speed oversampling factor."""
     old = m * _REFERENCE_SPEED_OVERSAMPLING
-    new = m * SPEED_OVERSAMPLING
+    new = m * speed_oversampling
     return 1.0 if old <= 1 else (new - 1) / (old - 1)
 
 
@@ -92,6 +107,27 @@ class VibrationsComputation:
         self.max_freq = max_freq
         self.motors = motors
         self.st_version = st_version
+        # Spectrogram grid; resolved per-run in compute() via _resolve_grid(). Defaulted here so
+        # the grid-dependent helpers are safe if a method is exercised directly (e.g. in tests).
+        self._n_angles = N_ANGLES
+        self._speed_oversampling = SPEED_OVERSAMPLING
+
+    @staticmethod
+    def _resolve_grid() -> Tuple[int, int]:
+        """Choose (n_angles, speed_oversampling) for this run. The finer grid is only used when the
+        compiled native kernel is available: the pure-Python fallback of the projection is
+        O(n_angles * m * speed_oversampling), so the finer grid would be ~4x slower on a host without
+        native acceleration (e.g. a Pi Zero whose prebuilt binary is missing or stale). On such hosts
+        the original (720, 6) grid is kept so performance is unchanged; where native is present the
+        finer (1440, 12) grid costs only a few extra milliseconds."""
+        try:
+            from ...native import get_native
+
+            if get_native() is not None:
+                return N_ANGLES, SPEED_OVERSAMPLING
+        except Exception:
+            pass
+        return _REFERENCE_N_ANGLES, _REFERENCE_SPEED_OVERSAMPLING
 
     def compute(self) -> VibrationsResult:
         """Perform vibrations analysis computation"""
@@ -101,6 +137,9 @@ class VibrationsComputation:
             main_angles = [45, 135]
         else:
             raise ValueError('Only Cartesian, CoreXY and CoreXZ kinematics are supported by this tool at the moment!')
+
+        # Resolve the spectrogram grid once per run (finer only when native acceleration is available)
+        self._n_angles, self._speed_oversampling = self._resolve_grid()
 
         psds = {}
         psds_sum = {}
@@ -152,7 +191,7 @@ class VibrationsComputation:
         # pinning their PHYSICAL (mm/s) width to what they were at the reference oversampling
         # factor (6x -> smoothing_window=15, detect_peaks window/vicinity=10).
         m = len(measured_speeds)
-        speed_ratio = _speed_window_ratio(m)
+        speed_ratio = _speed_window_ratio(m, self._speed_oversampling)
         sp_min_energy, sp_max_energy, sp_variance_energy, vibration_metric = self._compute_speed_powers(
             spectrogram_data, smoothing_window=_round_to_odd(15 * speed_ratio)
         )
@@ -354,14 +393,14 @@ class VibrationsComputation:
             vibs_b = np.array([data[a1].get(s, 0.0) for s in measured_speeds], dtype=np.float64)
             corexy = kinematics in {'corexy', 'limited_corexy'}
             try:
-                return nat.dir_speed_spectrogram(ms, vibs_a, vibs_b, corexy, N_ANGLES, SPEED_OVERSAMPLING)
+                return nat.dir_speed_spectrogram(ms, vibs_a, vibs_b, corexy, self._n_angles, self._speed_oversampling)
             except Exception:
                 pass  # fall through to the pure-Python implementation below
 
         # We want to project the motor vibrations measured on their own axes on the [0, 360] range
-        spectrum_angles = np.linspace(0, 360, N_ANGLES)
+        spectrum_angles = np.linspace(0, 360, self._n_angles)
         spectrum_speeds = np.linspace(
-            min(measured_speeds), max(measured_speeds), len(measured_speeds) * SPEED_OVERSAMPLING
+            min(measured_speeds), max(measured_speeds), len(measured_speeds) * self._speed_oversampling
         )
         spectrum_vibrations = np.zeros((len(spectrum_angles), len(spectrum_speeds)))
 
@@ -405,7 +444,7 @@ class VibrationsComputation:
         # PHYSICAL (degrees) width stays exactly the same as at the reference resolution (720
         # angles -> kernel_width=15, pad=9); at N_ANGLES == _REFERENCE_N_ANGLES the ratio is 1.0
         # and these are bit-identical to the original hardcoded values.
-        ratio = _angle_window_ratio()
+        ratio = _angle_window_ratio(self._n_angles)
         kernel_width = _round_to_odd(15 * ratio)
         pad = max(kernel_width // 2, int(round(9 * ratio)))
 
@@ -476,17 +515,25 @@ class VibrationsComputation:
                 continue
 
             ratio = hi_e / lo_e
+            # In Klipper, speeds BELOW stealthchop_threshold run in stealthChop and speeds ABOVE it
+            # run in spreadCycle (stealthchop_threshold: 0 disables stealthChop -> spreadCycle
+            # everywhere). The fix is to push the whole tested range into the QUIETER mode, so the
+            # advice must move the transition to the far side of the range from the noisier mode.
             if energy_above > energy_below:
+                # spreadCycle (above the transition) is the noisier mode -> keep the range in the
+                # quieter stealthChop by raising the threshold above the top tested speed.
                 worse_side = 'spreadCycle (above the transition)'
                 advice = (
-                    f'consider stealthchop_threshold: 0 (spreadCycle always) or lowering it below '
-                    f'{all_speeds.min():.0f} mm/s'
+                    f'the quieter mode here is stealthChop -- consider raising stealthchop_threshold '
+                    f'above {all_speeds.max():.0f} mm/s so your print speeds stay in stealthChop'
                 )
             else:
+                # stealthChop (below the transition) is the noisier mode -> keep the range in the
+                # quieter spreadCycle by lowering/zeroing the threshold.
                 worse_side = 'stealthChop (below the transition)'
                 advice = (
-                    f'consider raising stealthchop_threshold above {all_speeds.max():.0f} mm/s '
-                    f'(stealthChop always) or below {v_thr:.0f} mm/s'
+                    f'the quieter mode here is spreadCycle -- consider stealthchop_threshold: 0 '
+                    f'(spreadCycle always) or lowering it below {all_speeds.min():.0f} mm/s'
                 )
 
             msg = (
