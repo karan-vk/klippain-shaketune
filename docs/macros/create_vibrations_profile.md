@@ -23,6 +23,12 @@ Call the `CREATE_VIBRATIONS_PROFILE` macro with the speed range you want to meas
 
 The `CREATE_VIBRATIONS_PROFILE` macro results are constituted of a set of 6 plots. At the top of the figure you can also see all the detected motor, current and TMC driver parameters. These notes are just for reference in case you want to tinker with them and don't forget what you changed between each run of the macro.
 
+Beyond the graphs, the macro also prints a few actionable hints to the console: the speed ranges to *avoid* (high-vibration peaks) and the *lowest-vibration* speed ranges to prefer in your slicer profile, and — when your steppers use TMC drivers with stealthChop configured — a **TMC stealthChop hint**. If the stealthChop→spreadCycle transition (`stealthchop_threshold`) falls inside your tested speed range and one side of it is clearly noisier than the other, Shake&Tune suggests moving the threshold so your print-speed range sits in the *quieter* mode. This hint is deliberately conservative and only appears when the evidence is strong, so treat it as a starting point for experimentation.
+
+  > **Note**
+  >
+  > When native acceleration is available, the directional projection is computed on a finer grid for smoother polar/heatmap plots. This only interpolates the same measured data more densely — it doesn't add spurious vibration peaks — and it automatically falls back to the original resolution on hosts without the native module so performance is unchanged there.
+
 ![](../images/vibrations_example.png)
 
 ### Global Speed Energy Profile

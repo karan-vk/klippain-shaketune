@@ -22,11 +22,17 @@ Then, call the `AXES_SHAPER_CALIBRATION` macro and look for the graphs in the re
 |Z_HEIGHT|None|Z height wanted for the test. This value can be used if needed to override the Z value of the probe_point set in your `[resonance_tester]` config section|
 |MAX_SCALE|None|maximum energy value to scale the input shaper graph. Useful for comparing multiple consecutive tests by forcing the same energy scale|
 |ACCEL_CHIP|None|accelerometer chip you want to use for the test. If not provided, the macro will automatically find the best accelerometer chip for each axis based on your `[resonance_tester]` config section|
+|APPLY|0|if set to `1`, applies the recommended shaper for the current session via `SET_INPUT_SHAPER` (only for the measured axes; skipped on `dual_carriage` machines). This is **not** persisted — see the note below|
+|APPLY_TARGET|low_vibration|which recommendation to apply when `APPLY=1`: `low_vibration` (Klipper's own choice, the safer default) or `performance` (highest acceleration below the vibration threshold)|
 
 
   > **Note**
   >
   > If you are wondering wether you should use sweeping or not, have a read on the [dedicated section here](../is_tuning_generalities.md#should-i-use-the-sweeping-or-pulse-only-test).
+
+  > **Ready-to-apply configuration**
+  >
+  > At the end of the run, Shake&Tune prints a copy-pasteable `[input_shaper]` block (with the measured `damping_ratio` when it could be determined). Paste it into your `printer.cfg` and restart Klipper to make it permanent. `APPLY=1` sets those same values live for the current session only (a convenient way to A/B test them immediately) — it is **not** saved, so you still need to paste the block and restart (or `SAVE_CONFIG`) to keep it across restarts.
 
 ![](../images/shaper_graphs/shaper_graph_explanation.png)
 

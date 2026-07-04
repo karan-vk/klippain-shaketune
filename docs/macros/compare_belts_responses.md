@@ -53,6 +53,7 @@ Paired peaks at the same frequency will be on the same point (labeled α1/α2, �
 
   1. **The estimated similarity** measure provides a quantitative view of how closely the frequency profiles of the two belts match across their entire range. A similarity value close to 100% means that the belts are well matched, indicating equal tension and uniform mechanical behavior.
   2. **The mechanical health indicator** provides another assessment of the printer's operating condition based on the estimated similarity and influenced by the number of paired and unpaired peaks. A noisy signal generally lowers the value of this indicator, indicating potential problems. However, this measure can sometimes be misleading, so it's important not to rely on it alone and to consider it in conjunction with the other information displayed.
+  3. **The belt tension guidance** compares the main resonance frequency of the two belts and prints a short hint to the console (and a line on the graph). Because belt tension is proportional to the square of the resonant frequency, the belt whose main peak is at the *lower* frequency is the *looser* one — so when the two peaks differ noticeably, Shake&Tune tells you which belt to tighten. If no common resonance peak is found at all, it says so instead of guessing at tension (that usually points to a mechanical issue rather than a tension difference). Treat it as a helper on top of the curves, not a replacement for reading them.
 
   > **Note**:
   >

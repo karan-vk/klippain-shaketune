@@ -19,6 +19,8 @@ First, you may want to read the **[input shaping and tuning generalities](./is_t
 |[`AXES_SHAPER_CALIBRATION`](./macros/axes_shaper_calibrations.md)<br /><br />Create the usual input shaper graphs to tune Klipper's input shaper filters and reduce ringing/ghosting | [<img src="./images/axis_example.png">](./macros/axes_shaper_calibrations.md) |
 |[`CREATE_VIBRATIONS_PROFILE`](./macros/create_vibrations_profile.md)<br /><br />Measure your global machine vibrations as a function of toolhead direction and speed to find problematic ranges where the printer could be exposed to more VFAs in order to optimize your slicer speed profiles and TMC drivers parameters | [<img src="./images/vibrations_example.png">](./macros/create_vibrations_profile.md) |
 |[`EXCITATE_AXIS_AT_FREQ`](./macros/excitate_axis_at_freq.md)<br /><br />Maintain a specific excitation frequency, useful to inspect parasite peaks and find out what is resonating | [<img src="./images/excitate_at_freq_example.png">](./macros/excitate_axis_at_freq.md) |
+|[`SHAKETUNE_HEALTHCHECK`](./macros/shaketune_healthcheck.md)<br /><br />Run a quick per-axis resonance sweep and compare it against a stored baseline to catch mechanical drift over time (belt stretch, loosening screws, degrading bearings) | — |
+|[`SHAKETUNE_TREND`](./macros/shaketune_trend.md)<br /><br />Plot how your calibration metrics (resonant frequency, damping, belt similarity, vibration symmetry) evolve over time from the recorded history, without taking any new measurement | — |
 
 ## Shake&Tune CLI
 

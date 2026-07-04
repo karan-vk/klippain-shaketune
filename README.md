@@ -73,7 +73,7 @@ The goal is to keep the tools usable on low-power hosts (Raspberry Pi Zero / 1 G
 | `.stdata` save (serialize + compress) | 16.3 s | 1.5 s | ~11× |
 | Klipper input-shaper PSD (per measurement) | 69 ms | 38 ms | ~1.8× |
 
-The vibrations projection is the standout because it replaces a 432,000-iteration Python loop (720 angles × 600 speeds, each calling NumPy on scalars) with a single native call — this is the bulk of what made `CREATE_VIBRATIONS_PROFILE` take several minutes. That command benefits most overall, since it *also* runs ~200 of the per-measurement PSDs above.
+The vibrations projection is the standout because it replaces a large Python double loop (one iteration per angle × target speed, each calling NumPy on scalars) with a single native call — this is the bulk of what made `CREATE_VIBRATIONS_PROFILE` take several minutes. Because native makes it near-instant, that projection now runs on a **finer grid (1440 angles, 12× speed oversampling)** for smoother polar/heatmap plots when native acceleration is available; on a host without native it automatically stays on the original coarser grid so the pure-Python fallback isn't slower than before. The finer grid only interpolates the same measured data, so it never adds spurious vibration peaks. `CREATE_VIBRATIONS_PROFILE` benefits most overall, since it *also* runs ~200 of the per-measurement PSDs above.
 
 On memory, the in-memory accelerometer samples for a 1M-sample recording drop from **~176 MB** (a Python list of tuples) to **~32 MB** (a NumPy array) — about **5.5× less** — with a slightly smaller `.stdata` file too (compact binary vs JSON). This is the difference that keeps large recordings from exhausting RAM on 512 MB / 1 GB boards.
 
