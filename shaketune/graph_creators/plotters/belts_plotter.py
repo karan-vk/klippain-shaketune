@@ -104,6 +104,10 @@ class BeltsPlotter(PlotterStrategy):
                 ]
             )
 
+        if data.get('tension_guidance'):
+            tension_headline = data['tension_guidance']['message'].split('. ')[0]
+            title_lines.append({'x': 0.480, 'y': 0.887, 'va': 'top', 'fontsize': 13, 'text': f'| {tension_headline}'})
+
         self.add_title(fig, title_lines)
 
     def _plot_psd_signals(self, ax, data: Dict[str, Any]) -> None:

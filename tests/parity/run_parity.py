@@ -119,18 +119,19 @@ def set_native_disabled(disabled: bool):
 # --------------------------------------------------------------------------------------------
 
 
-def reference_dir_speed_spectrogram(measured_speeds, vibs_a, vibs_b, corexy):
+def reference_dir_speed_spectrogram(measured_speeds, vibs_a, vibs_b, corexy, n_angles=720, speed_oversampling=6):
     """Faithful, standalone re-implementation of
     VibrationsComputation._compute_dir_speed_spectrogram (see
     shaketune/graph_creators/computations/vibrations_computation.py), adapted to take two flat
     per-angle value arrays instead of a nested {angle: {speed: value}} dict, to match the native
-    `dir_speed_spectrogram(measured_speeds, vibs_a, vibs_b, corexy)` contract."""
+    `dir_speed_spectrogram(measured_speeds, vibs_a, vibs_b, corexy, n_angles, speed_oversampling)`
+    contract."""
     measured_speeds = list(measured_speeds)
     data_a = dict(zip(measured_speeds, vibs_a))
     data_b = dict(zip(measured_speeds, vibs_b))
 
-    spectrum_angles = np.linspace(0, 360, 720)
-    spectrum_speeds = np.linspace(min(measured_speeds), max(measured_speeds), len(measured_speeds) * 6)
+    spectrum_angles = np.linspace(0, 360, n_angles)
+    spectrum_speeds = np.linspace(min(measured_speeds), max(measured_speeds), len(measured_speeds) * speed_oversampling)
     spectrum_vibrations = np.zeros((len(spectrum_angles), len(spectrum_speeds)))
 
     def get_interpolated_vibrations(data, speed, speeds):
@@ -165,17 +166,14 @@ def reference_dir_speed_spectrogram(measured_speeds, vibs_a, vibs_b, corexy):
 
 
 def kernel1_dir_speed_spectrogram(results: Results, corpus_dir: Path):
-    name = 'kernel1 dir_speed_spectrogram'
     from shaketune.native import get_native
 
     nm = get_native()
-    if nm is None:
-        results.record(name, 'SKIP', 'native module not available')
-        return
 
     npz_path = corpus_dir / 'vibrations.npz'
     if not npz_path.exists():
-        results.record(name, 'SKIP', f'{npz_path} missing, run gen_corpus.py first')
+        for name in ('kernel1 dir_speed_spectrogram (720x6)', 'kernel1 dir_speed_spectrogram (1440x12)'):
+            results.record(name, 'SKIP', f'{npz_path} missing, run gen_corpus.py first')
         return
 
     data = np.load(npz_path)
@@ -185,21 +183,31 @@ def kernel1_dir_speed_spectrogram(results: Results, corpus_dir: Path):
     vibs_b = np.ascontiguousarray(values[1], dtype=np.float64)
     measured_speeds = np.ascontiguousarray(speeds, dtype=np.float64)
 
-    try:
-        for corexy in (False, True):
-            ref_angles, ref_speeds, ref_vibs = reference_dir_speed_spectrogram(measured_speeds, vibs_a, vibs_b, corexy)
-            native_angles, native_speeds, native_vibs = nm.dir_speed_spectrogram(
-                measured_speeds, vibs_a, vibs_b, corexy
-            )
+    # Parity is checked at BOTH the legacy reference grid (720 angles, 6x speed oversampling) and
+    # the shipped-default finer grid (1440, 12x) as two separate result rows, since the grid shape
+    # is now passed through the FFI on every call rather than hardcoded on the Rust side.
+    for n_angles, speed_oversampling in ((720, 6), (1440, 12)):
+        name = f'kernel1 dir_speed_spectrogram ({n_angles}x{speed_oversampling})'
+        if nm is None:
+            results.record(name, 'SKIP', 'native module not available')
+            continue
+        try:
+            for corexy in (False, True):
+                ref_angles, ref_speeds, ref_vibs = reference_dir_speed_spectrogram(
+                    measured_speeds, vibs_a, vibs_b, corexy, n_angles, speed_oversampling
+                )
+                native_angles, native_speeds, native_vibs = nm.dir_speed_spectrogram(
+                    measured_speeds, vibs_a, vibs_b, corexy, n_angles, speed_oversampling
+                )
 
-            np.testing.assert_array_equal(native_angles, ref_angles)
-            np.testing.assert_array_equal(native_speeds, ref_speeds)
-            np.testing.assert_allclose(native_vibs, ref_vibs, rtol=1e-12)
-    except AssertionError as exc:
-        results.record(name, 'FAIL', _first_line(exc))
-        return
+                np.testing.assert_array_equal(native_angles, ref_angles)
+                np.testing.assert_array_equal(native_speeds, ref_speeds)
+                np.testing.assert_allclose(native_vibs, ref_vibs, rtol=1e-12)
+        except AssertionError as exc:
+            results.record(name, 'FAIL', _first_line(exc))
+            continue
 
-    results.record(name, 'PASS', 'matched reference for corexy=False and corexy=True')
+        results.record(name, 'PASS', 'matched reference for corexy=False and corexy=True')
 
 
 # --------------------------------------------------------------------------------------------

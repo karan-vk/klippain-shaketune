@@ -3,43 +3,52 @@
 # Copyright (C) 2024 Félix Boisselier <felix@fboisselier.fr> (Frix_x on Discord)
 # Licensed under the GNU General Public License v3.0 (GPL-3.0)
 #
-# File: compare_belts_responses.py
-# Description: Provides a command for comparing the frequency response of belts in CoreXY and CoreXZ kinematics 3D printers.
-#              The script performs resonance tests along specified axes, starts and stops measurements, and generates graphs
-#              for each axis to analyze the collected data.
+# File: healthcheck.py
+# Description: Provides the SHAKETUNE_HEALTHCHECK command: a quick per-axis resonance sweep
+#              (faster and lower resolution than AXES_SHAPER_CALIBRATION) compared against a
+#              stored baseline to catch mechanical drift over time (belt stretch, loosening
+#              screws, degrading bearings, ...). MODE=BASELINE captures the reference; MODE=CHECK
+#              (the default) compares the current sweep against it and prints a PASS/WARN verdict.
 
 from datetime import datetime
 
-from ..helpers import metrics_store
+from ..helpers import healthcheck_report, metrics_store
 from ..helpers.accelerometer import Accelerometer, MeasurementsManager
 from ..helpers.common_func import AXIS_CONFIG
 from ..helpers.compat import KlipperCompatibility
 from ..helpers.console_output import ConsoleOutput
-from ..helpers.motors_config_parser import MotorsConfigParser
 from ..helpers.resonance_test import vibrate_axis
 from ..shaketune_process import ShakeTuneProcess
 
 
-def compare_belts_responses(gcmd, klipper_config, st_process: ShakeTuneProcess) -> None:
+def healthcheck(gcmd, klipper_config, st_process: ShakeTuneProcess) -> None:
     date = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+    mode = gcmd.get('MODE', default='check').lower()
+    if mode not in ('check', 'baseline'):
+        raise gcmd.error('MODE selection invalid. Should be either CHECK or BASELINE!')
+
+    # Fail fast, before any toolhead motion, if a CHECK is requested with no baseline recorded yet
+    if mode == 'check' and not healthcheck_report.baseline_path(st_process.get_st_config()).exists():
+        raise gcmd.error('No healthcheck baseline found! Run SHAKETUNE_HEALTHCHECK MODE=BASELINE first.')
 
     printer = klipper_config.get_printer()
     toolhead = printer.lookup_object('toolhead')
     res_tester = printer.lookup_object('resonance_tester')
     systime = printer.get_reactor().monotonic()
 
-    # Get the default values for the frequency range and the acceleration per Hz
+    # Get the default acceleration per Hz value (the frequency range itself is intentionally
+    # narrower and quicker than the full AXES_SHAPER_CALIBRATION sweep, see FREQ_START/FREQ_END below)
     compat = KlipperCompatibility(klipper_config)
     res_config = compat.get_res_tester_config()
-    default_min_freq, default_max_freq, default_accel_per_hz, test_points = res_config
+    _, _, default_accel_per_hz, test_points = res_config
 
-    min_freq = gcmd.get_float('FREQ_START', default=default_min_freq, minval=1)
-    max_freq = gcmd.get_float('FREQ_END', default=default_max_freq, minval=1)
-    hz_per_sec = gcmd.get_float('HZ_PER_SEC', default=1, minval=1)
+    min_freq = gcmd.get_float('FREQ_START', default=30.0, minval=1)
+    max_freq = gcmd.get_float('FREQ_END', default=115.0, minval=1)
+    hz_per_sec = gcmd.get_float('HZ_PER_SEC', default=4.0, minval=1)
     accel_per_hz = gcmd.get_float('ACCEL_PER_HZ', default=None)
     feedrate_travel = gcmd.get_float('TRAVEL_SPEED', default=120.0, minval=20.0)
     z_height = gcmd.get_float('Z_HEIGHT', default=None, minval=1)
-    max_scale = gcmd.get_int('MAX_SCALE', default=None, minval=1)
     accel_chip = gcmd.get('ACCEL_CHIP', default=None)
 
     if accel_per_hz == '':
@@ -53,29 +62,6 @@ def compare_belts_responses(gcmd, klipper_config, st_process: ShakeTuneProcess) 
     gcode = printer.lookup_object('gcode')
 
     max_accel = max_freq * accel_per_hz
-
-    motors_config_parser = MotorsConfigParser(klipper_config, motors=None)
-    if motors_config_parser.kinematics in {'corexy', 'limited_corexy'}:
-        filtered_config = [a for a in AXIS_CONFIG if a['axis'] in ('a', 'b')]
-        if accel_chip is None:
-            accel_chip = Accelerometer.find_axis_accelerometer(printer, 'xy')
-    elif motors_config_parser.kinematics in {'corexz', 'limited_corexz'}:
-        filtered_config = [a for a in AXIS_CONFIG if a['axis'] in ('corexz_x', 'corexz_z')]
-        # For CoreXZ kinematics, we can use the X axis accelerometer as most of the time they are moving bed printers
-        if accel_chip is None:
-            accel_chip = Accelerometer.find_axis_accelerometer(printer, 'x')
-    else:
-        raise gcmd.error(f'CoreXY and CoreXZ kinematics required, {motors_config_parser.kinematics} found')
-    ConsoleOutput.print(f'{motors_config_parser.kinematics.upper()} kinematics mode')
-
-    if accel_chip is None:
-        raise gcmd.error(
-            'No suitable accelerometer found for measurement! Multi-accelerometer configurations are not supported for this macro.'
-        )
-    k_accelerometer = printer.lookup_object(accel_chip, None)
-    if k_accelerometer is None:
-        raise gcmd.error('User provided ACCEL_CHIP parameter is not valid!')
-    accelerometer = Accelerometer(k_accelerometer, printer.get_reactor())
 
     # Move to the starting point
     if len(test_points) > 1:
@@ -115,18 +101,30 @@ def compare_belts_responses(gcmd, klipper_config, st_process: ShakeTuneProcess) 
         input_shaper = None
 
     creator = st_process.get_graph_creator()
-    filename = creator.get_folder() / f'{creator.get_type().replace(" ", "")}_{date}'
+    filename = creator.get_folder() / f'{creator.get_type()}_{date}'
     measurements_manager = MeasurementsManager(st_process.get_st_config().chunk_size, printer.get_reactor(), filename)
 
-    # Run the test for each axis
+    # Run the quick sweep for each axis, into one shared measurements file (like COMPARE_BELTS_RESPONSES)
+    filtered_config = [a for a in AXIS_CONFIG if a['axis'] in ('x', 'y')]
     for config in filtered_config:
         toolhead.manual_move(point, feedrate_travel)
         toolhead.dwell(0.5)
         toolhead.wait_moves()
 
+        # First we need to find the accelerometer chip suited for the axis (if not provided by the user)
+        current_accel_chip = accel_chip  # Use manually specified chip if provided
+        if current_accel_chip is None:
+            current_accel_chip = Accelerometer.find_axis_accelerometer(printer, config['axis'])
+        if current_accel_chip is None:
+            raise gcmd.error('No suitable accelerometer found for measurement!')
+        k_accelerometer = printer.lookup_object(current_accel_chip, None)
+        if k_accelerometer is None:
+            raise gcmd.error(f'Accelerometer chip "{current_accel_chip}" not found!')
+        accelerometer = Accelerometer(k_accelerometer, printer.get_reactor())
+
         ConsoleOutput.print(f'Measuring {config["label"]}...')
         accelerometer.start_recording(measurements_manager, name=config['label'], append_time=True)
-        test_params = vibrate_axis(
+        vibrate_axis(
             toolhead,
             gcode,
             config['direction'],
@@ -138,8 +136,26 @@ def compare_belts_responses(gcmd, klipper_config, st_process: ShakeTuneProcess) 
             klipper_config,
         )
         accelerometer.stop_recording()
-        toolhead.dwell(5)  # Wait 5 seconds to let the printer settle down (needed for low power hosts computers)
+        toolhead.dwell(0.5)
         toolhead.wait_moves()
+
+    # Run post-processing: a single combined graph (and history entry) for both axes
+    ConsoleOutput.print('Healthcheck frequency profile generation...')
+    creator.configure(mode=mode)
+    creator.define_output_target(filename)
+    measurements_manager.save_stdata()
+    st_process.run(filename)
+    st_process.wait_for_completion()
+
+    current = metrics_store.read_current_summary(filename)
+    if mode == 'baseline':
+        ConsoleOutput.print('Healthcheck baseline captured.')
+    else:
+        baseline = healthcheck_report.load_baseline(st_process.get_st_config())
+        status, lines = healthcheck_report.compare_to_baseline(current or {}, baseline or {})
+        for line in lines:
+            ConsoleOutput.print(line)
+        ConsoleOutput.print(f'Healthcheck result: {status}')
 
     # Re-enable the input shaper if it was active
     if input_shaper is not None:
@@ -150,13 +166,3 @@ def compare_belts_responses(gcmd, klipper_config, st_process: ShakeTuneProcess) 
         gcode.run_script_from_command(f'SET_VELOCITY_LIMIT ACCEL={old_accel} MINIMUM_CRUISE_RATIO={old_mcr}')
     else:  # minimum_cruise_ratio not found: Klipper < v0.12.0-239
         gcode.run_script_from_command(f'SET_VELOCITY_LIMIT ACCEL={old_accel}')
-
-    # Run post-processing
-    ConsoleOutput.print('Belts comparative frequency profile generation...')
-    ConsoleOutput.print('This may take some time (1-3min)')
-    creator.configure(motors_config_parser.kinematics, test_params, max_scale)
-    creator.define_output_target(filename)
-    measurements_manager.save_stdata()
-    st_process.run(filename)
-    st_process.wait_for_completion()
-    metrics_store.print_run_summary(st_process.get_st_config(), filename, creator.get_type())

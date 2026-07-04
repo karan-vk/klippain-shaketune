@@ -78,13 +78,17 @@ fn dir_speed_spectrogram<'py>(
     vibs_a: PyReadonlyArray1<'py, f64>,
     vibs_b: PyReadonlyArray1<'py, f64>,
     corexy: bool,
+    n_angles: usize,
+    speed_oversampling: usize,
 ) -> PyResult<DirSpeedSpectrogramPyOutput<'py>> {
     let speeds: Vec<f64> = measured_speeds.as_array().iter().copied().collect();
     let a: Vec<f64> = vibs_a.as_array().iter().copied().collect();
     let b: Vec<f64> = vibs_b.as_array().iter().copied().collect();
 
     let (angles, out_speeds, vib) = py
-        .allow_threads(move || vibrations::compute_dir_speed_spectrogram(&speeds, &a, &b, corexy))
+        .allow_threads(move || {
+            vibrations::compute_dir_speed_spectrogram(&speeds, &a, &b, corexy, n_angles, speed_oversampling)
+        })
         .map_err(PyValueError::new_err)?;
 
     Ok((angles.into_pyarray(py), out_speeds.into_pyarray(py), vib.into_pyarray(py)))

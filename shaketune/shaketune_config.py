@@ -21,6 +21,8 @@ RESULTS_SUBFOLDERS = {
     'input shaper': 'input_shaper',
     'vibrations profile': 'vibrations',
     'static frequency': 'static_freq',
+    'trend': 'trend',
+    'healthcheck': 'healthcheck',
 }
 
 

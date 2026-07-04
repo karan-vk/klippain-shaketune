@@ -6,7 +6,7 @@
 # File: belts_computation.py
 # Description: Computation implementation for belts comparison analysis
 
-from typing import Any, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import numpy as np
 
@@ -20,6 +20,13 @@ from ..computation_results import BeltsResult, SignalData
 PEAKS_DETECTION_THRESHOLD = 0.1  # Threshold to detect peaks in the PSD signal (10% of max)
 DC_MAX_PEAKS = 2  # Maximum ideal number of peaks
 DC_MAX_UNPAIRED_PEAKS_ALLOWED = 0  # No unpaired peaks are tolerated
+
+# Belt tension guidance thresholds. A belt behaves roughly like a string under tension: its
+# natural frequency f is proportional to sqrt(T) for a fixed span, so for a small mismatch
+# ΔT/T ≈ 2·Δf/f. Around the typical ~100 Hz belt resonance, a 2 Hz drift is ~4% tension
+# mismatch and a 5 Hz drift is ~10% mismatch -- hence the well-matched/slightly-loose/significantly-loose bands below.
+BELT_DELTA_F_WELL_MATCHED_HZ = 2.0
+BELT_DELTA_F_SLIGHTLY_LOOSE_HZ = 5.0
 
 
 class PeakPairingResult(NamedTuple):
@@ -94,6 +101,7 @@ class BeltsComputation:
         # Compute similarity factor and MHI if needed (for symmetric kinematics)
         similarity_factor = None
         mhi = None
+        tension_guidance = None
         if self.kinematics in {'limited_corexy', 'corexy', 'limited_corexz', 'corexz'}:
             correlation = np.corrcoef(signal1.psd, signal2.psd)[0, 1]
             similarity_factor = correlation * 100
@@ -102,6 +110,10 @@ class BeltsComputation:
 
             mhi = self._compute_mhi(similarity_factor, signal1, signal2)
             ConsoleOutput.print(f'Mechanical health: {mhi}')
+
+            tension_guidance = self._compute_tension_guidance(signal1, signal2, signal1_belt, signal2_belt)
+            if tension_guidance is not None:
+                ConsoleOutput.print(tension_guidance['message'])
 
         # Create metadata
         metadata = GraphMetadata(
@@ -126,6 +138,7 @@ class BeltsComputation:
             max_scale=self.max_scale,
             similarity_factor=similarity_factor,
             mhi=mhi,
+            tension_guidance=tension_guidance,
         )
 
     def _compute_signal_data(self, data: np.ndarray, common_freqs: np.ndarray, max_freq: float) -> SignalData:
@@ -247,3 +260,62 @@ class BeltsComputation:
             (message for lower, upper, message in ranges if lower < mhi <= upper),
             'Unknown mechanical health',
         )
+
+    def _compute_tension_guidance(
+        self, signal1: SignalData, signal2: SignalData, belt1_label: str, belt2_label: str
+    ) -> Optional[Dict[str, Any]]:
+        """Compare the main paired-peak frequencies between the two belts to estimate a tension
+        mismatch. Only meaningful for belt-vs-belt kinematics (CoreXY/CoreXZ)"""
+        paired = signal1.paired_peaks
+
+        if not paired:
+            if signal1.unpaired_peaks or signal2.unpaired_peaks:
+                return {
+                    'status': 'no_common_peak',
+                    'message': (
+                        'Unable to compare belt tension: no common resonance peak was found between the two belts. '
+                        'This usually points to a mechanical issue (a loose or binding component) rather than a '
+                        'tension difference — inspect belts, pulleys and gantry before adjusting tension.'
+                    ),
+                    'delta_f': None,
+                    'looser_belt': None,
+                }
+            return {
+                'status': 'no_peaks',
+                'message': 'Unable to compare belt tension: no resonance peaks detected on either belt.',
+                'delta_f': None,
+                'looser_belt': None,
+            }
+
+        main_pair = max(paired, key=lambda p: (p[0][2] + p[1][2]) / 2.0)
+        f1, amp1 = main_pair[0][1], main_pair[0][2]
+        f2, amp2 = main_pair[1][1], main_pair[1][2]
+        delta_f = abs(f1 - f2)
+        rel_amp_diff_pct = abs(amp1 - amp2) / max(amp1, amp2) * 100
+        looser_belt = belt1_label if f1 < f2 else belt2_label  # Lower frequency = looser belt (f ∝ sqrt(T))
+
+        if delta_f < BELT_DELTA_F_WELL_MATCHED_HZ:
+            status = 'ok'
+            message = f'Belts tension is well matched (Δf={delta_f:.1f} Hz).'
+        elif delta_f <= BELT_DELTA_F_SLIGHTLY_LOOSE_HZ:
+            status = 'slightly_loose'
+            message = (
+                f'Belts tension is slightly off (Δf={delta_f:.1f} Hz): {looser_belt} appears slightly loose. '
+                f'Consider a small tension increase on {looser_belt}.'
+            )
+        else:
+            status = 'significantly_loose'
+            message = (
+                f'Belts tension is significantly mismatched (Δf={delta_f:.1f} Hz): {looser_belt} is significantly '
+                f'loose. Re-tension {looser_belt} before continuing.'
+            )
+
+        return {
+            'status': status,
+            'message': message,
+            'delta_f': float(delta_f),
+            'rel_amp_diff_pct': float(rel_amp_diff_pct),
+            'looser_belt': looser_belt,
+            'freq1': float(f1),
+            'freq2': float(f2),
+        }

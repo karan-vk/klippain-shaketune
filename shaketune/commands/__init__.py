@@ -12,3 +12,5 @@ from .axes_shaper_calibration import axes_shaper_calibration as axes_shaper_cali
 from .compare_belts_responses import compare_belts_responses as compare_belts_responses
 from .create_vibrations_profile import create_vibrations_profile as create_vibrations_profile
 from .excitate_axis_at_freq import excitate_axis_at_freq as excitate_axis_at_freq
+from .healthcheck import healthcheck as healthcheck
+from .render_trend import render_trend as render_trend

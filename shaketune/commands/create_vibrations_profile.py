@@ -12,6 +12,7 @@
 import math
 from datetime import datetime
 
+from ..helpers import metrics_store
 from ..helpers.accelerometer import Accelerometer, MeasurementsManager
 from ..helpers.console_output import ConsoleOutput
 from ..helpers.motors_config_parser import MotorsConfigParser
@@ -161,3 +162,4 @@ def create_vibrations_profile(gcmd, config, st_process: ShakeTuneProcess) -> Non
     measurements_manager.save_stdata()
     st_process.run(filename)
     st_process.wait_for_completion()
+    metrics_store.print_run_summary(st_process.get_st_config(), filename, creator.get_type())

@@ -12,7 +12,30 @@ from typing import Any, Dict, List, Optional
 
 TRINAMIC_DRIVERS = ['tmc2130', 'tmc2208', 'tmc2209', 'tmc2240', 'tmc2660', 'tmc5160']
 MOTORS = ['stepper_x', 'stepper_y', 'stepper_x1', 'stepper_y1', 'stepper_z', 'stepper_z1', 'stepper_z2', 'stepper_z3']
-RELEVANT_TMC_REGISTERS = ['CHOPCONF', 'PWMCONF', 'COOLCONF', 'TPWMTHRS', 'TCOOLTHRS']
+RELEVANT_TMC_REGISTERS = ['GCONF', 'CHOPCONF', 'PWMCONF', 'COOLCONF', 'TPWMTHRS', 'TCOOLTHRS']
+
+# Sentinel returned by Klipper's TMCtstepHelper when there is no meaningful threshold
+# (stealthchop_threshold unset or 0): the transition sits at ~0mm/s, i.e. spreadCycle always
+TPWMTHRS_SENTINEL = 0xFFFFF
+
+
+def stealthchop_threshold_mm_s(
+    tmc_freq: Optional[float], step_dist: Optional[float], mres: Optional[int], tpwmthrs: Optional[int]
+) -> Optional[float]:
+    """Invert Klipper's TMCtstepHelper: return the stealthChop->spreadCycle transition velocity
+    in mm/s, or None when there is no meaningful in-band transition. tpwmthrs sentinels 0 and
+    0xfffff (=1048575, set when stealthchop_threshold is unset or 0) mean the transition sits at
+    ~0 mm/s (spreadCycle effectively always) -> return None."""
+    try:
+        if tpwmthrs is None or tpwmthrs <= 0 or tpwmthrs >= TPWMTHRS_SENTINEL:
+            return None
+        if not tmc_freq or not step_dist or mres is None:
+            return None
+        step_dist_256 = step_dist / (1 << mres)
+        v_thr = tmc_freq * step_dist_256 / tpwmthrs
+        return v_thr if v_thr > 0 else None
+    except Exception:
+        return None
 
 
 class Motor:
@@ -129,6 +152,7 @@ class MotorsConfigParser:
         motor.set_config('tmc', driver)
         self._parse_klipper_config(motor, tmc_object)
         self._parse_tmc_registers(motor, tmc_object)
+        self._parse_stealthchop_state(motor, tmc_object)
         return motor
 
     def _parse_klipper_config(self, motor: Motor, tmc_object: Any) -> None:
@@ -168,6 +192,53 @@ class MotorsConfigParser:
                 fields_string = self._extract_register_values(tmc_cmdhelper, register, val)
 
             motor.set_register(register, fields_string)
+
+    # Detect stealthChop support/state and compute the stealthChop->spreadCycle transition velocity.
+    # This must never raise: a parsing failure here must not break the vibrations command.
+    def _parse_stealthchop_state(self, motor: Motor, tmc_object: Any) -> None:
+        try:
+            tmc_cmdhelper = tmc_object.get_status.__self__
+            fields = tmc_cmdhelper.fields
+            mcu_tmc = tmc_cmdhelper.mcu_tmc
+
+            # The enable bit is family-specific: SPI drivers (tmc2130/tmc5160/tmc2240) expose
+            # en_pwm_mode (1=stealthChop), UART drivers (tmc2208/tmc2209) expose en_spreadcycle
+            # (1=spreadCycle-always, so it's inverted). Drivers with neither (e.g. tmc2660) have
+            # no stealthChop at all.
+            if fields.lookup_register('en_pwm_mode', None) is not None:
+                enabled = bool(fields.get_field('en_pwm_mode'))
+            elif fields.lookup_register('en_spreadcycle', None) is not None:
+                enabled = not bool(fields.get_field('en_spreadcycle'))
+            else:
+                motor.set_config('stealthchop_supported', False)
+                return
+        except Exception:
+            if motor.get_config('stealthchop_supported') is None:
+                motor.set_config('stealthchop_supported', False)
+            motor.set_config('stealthchop_threshold_mm_s', None)
+            return
+
+        motor.set_config('stealthchop_supported', True)
+        motor.set_config('stealthchop_enabled', enabled)
+        if not enabled:
+            motor.set_config('stealthchop_threshold_mm_s', None)
+            return
+
+        try:
+            # TPWMTHRS is write-only on many drivers, so we can't read it back from the chip:
+            # use the cached value from the register we already wrote instead
+            raw = fields.registers.get('TPWMTHRS')
+            tpwmthrs = fields.get_field('tpwmthrs', raw, 'TPWMTHRS') if raw is not None else None
+
+            tmc_freq = mcu_tmc.get_tmc_frequency()
+            step_dist = tmc_cmdhelper.stepper.get_step_dist()
+            mres = fields.get_field('mres')
+
+            v_thr = stealthchop_threshold_mm_s(tmc_freq, step_dist, mres, tpwmthrs)
+        except Exception:
+            v_thr = None
+
+        motor.set_config('stealthchop_threshold_mm_s', v_thr)
 
     def _extract_register_values(self, tmc_cmdhelper, register, val):
         # Provide a dictionary of register values

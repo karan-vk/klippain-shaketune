@@ -13,6 +13,13 @@ from pathlib import Path
 
 import numpy as np
 
+
+# numpy renamed trapz -> trapezoid in numpy 2.0 and removed the old alias in 2.5, while numpy 1.x
+# (still bundled with some Klipper installs) only exposes trapz. Resolve the available name once so
+# the rest of the plugin can integrate regardless of the numpy version on the host.
+trapezoid = getattr(np, 'trapezoid', None) or np.trapz
+
+
 # Constant used to define the standard axis direction and names
 AXIS_CONFIG = [
     {'axis': 'x', 'direction': (1, 0, 0), 'label': 'axis_X'},
@@ -44,6 +51,7 @@ def get_git_version():
 
     except Exception:
         return None
+
 
 # Compute natural resonant frequency and damping ratio by using the half power bandwidth method with interpolated frequencies
 def compute_mechanical_parameters(psd, freqs, min_freq=None):

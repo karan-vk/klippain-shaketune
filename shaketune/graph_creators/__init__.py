@@ -119,12 +119,14 @@ from .belts_graph_creator import BeltsGraphCreator  # noqa: E402
 # Import main components
 from .graph_creator import GraphCreator  # noqa: E402
 from .graph_creator_factory import GraphCreatorFactory  # noqa: E402
+from .healthcheck_graph_creator import HealthCheckGraphCreator  # noqa: E402
 from .plotting_utils import AxesConfiguration  # noqa: E402
 from .plotting_utils import PeakAnnotator  # noqa: E402
 from .plotting_utils import PlottingConstants  # noqa: E402
 from .plotting_utils import SpectrogramHelper, TableHelper  # noqa: E402
 from .shaper_graph_creator import ShaperGraphCreator  # noqa: E402
 from .static_graph_creator import StaticGraphCreator  # noqa: E402
+from .trend_graph_creator import TrendGraphCreator  # noqa: E402
 from .vibrations_graph_creator import VibrationsGraphCreator  # noqa: E402
 
 __all__ = [
@@ -132,8 +134,10 @@ __all__ = [
     'GraphCreatorFactory',
     'AxesMapGraphCreator',
     'BeltsGraphCreator',
+    'HealthCheckGraphCreator',
     'ShaperGraphCreator',
     'StaticGraphCreator',
+    'TrendGraphCreator',
     'VibrationsGraphCreator',
     'ComputationResult',
     'PlotterStrategy',

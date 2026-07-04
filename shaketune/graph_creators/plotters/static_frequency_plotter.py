@@ -10,9 +10,9 @@ from datetime import datetime
 from typing import Any, Dict
 
 import matplotlib.pyplot as plt
-import numpy as np
 from matplotlib.figure import Figure
 
+from ...helpers.common_func import trapezoid
 from ..base_models import PlotterStrategy
 from ..computation_results import StaticFrequencyResult
 from ..plotting_utils import AxesConfiguration, PlottingConstants, SpectrogramHelper
@@ -99,7 +99,7 @@ class StaticFrequencyPlotter(PlotterStrategy):
 
     def _plot_cumulative_energy(self, ax, data: Dict[str, Any]) -> None:
         """Plot cumulative energy"""
-        cumulative_energy = np.trapz(data['pdata'], data['t'], axis=0)
+        cumulative_energy = trapezoid(data['pdata'], data['t'], axis=0)
         ax.plot(cumulative_energy, data['bins'], color=PlottingConstants.KLIPPAIN_COLORS['orange'])
         ax.set_ylim([data['bins'][0], data['bins'][-1]])
 

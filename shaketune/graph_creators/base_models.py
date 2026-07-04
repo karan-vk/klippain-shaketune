@@ -38,6 +38,11 @@ class ComputationResult(ABC):
         """Return data formatted for plotting"""
         pass
 
+    @abstractmethod
+    def get_summary(self) -> Dict[str, Any]:
+        """Return a JSON-safe scalar summary of the result, for persistence/printing"""
+        pass
+
 
 @runtime_checkable
 class Plotter(Protocol):

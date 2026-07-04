@@ -7,8 +7,6 @@
 
 use numpy::ndarray::{Array1, Array2};
 
-const N_ANGLES: usize = 720;
-
 /// Result triple of [`compute_dir_speed_spectrogram`]: (angles, speeds, vibrations matrix).
 pub type DirSpeedSpectrogram = (Array1<f64>, Array1<f64>, Array2<f64>);
 
@@ -57,6 +55,8 @@ pub fn compute_dir_speed_spectrogram(
     vibs_a: &[f64],
     vibs_b: &[f64],
     corexy: bool,
+    n_angles: usize,
+    speed_oversampling: usize,
 ) -> Result<DirSpeedSpectrogram, String> {
     let m = measured_speeds.len();
     // Fewer than 2 measured speeds cannot be interpolated (the pure-Python original degenerates
@@ -66,9 +66,14 @@ pub fn compute_dir_speed_spectrogram(
     if m < 2 {
         return Err(format!("need at least 2 measured speeds for interpolation, got {m}"));
     }
-    let n_speeds = m * 6;
+    // Fewer than 2 angles cannot be linspace'd into a meaningful grid either (mirrors the m < 2
+    // guard above); error out so the dispatch site falls back to the pure-Python implementation.
+    if n_angles < 2 {
+        return Err(format!("need at least 2 angles for the spectrogram grid, got {n_angles}"));
+    }
+    let n_speeds = m * speed_oversampling;
 
-    let spectrum_angles = linspace(0.0, 360.0, N_ANGLES);
+    let spectrum_angles = linspace(0.0, 360.0, n_angles);
     let min_speed = measured_speeds.iter().cloned().fold(f64::INFINITY, f64::min);
     let max_speed = measured_speeds.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let spectrum_speeds = linspace(min_speed, max_speed, n_speeds);
@@ -78,9 +83,9 @@ pub fn compute_dir_speed_spectrogram(
     let cos_vals: Vec<f64> = spectrum_angles.iter().map(|a| (a.to_radians()).cos()).collect();
     let sin_vals: Vec<f64> = spectrum_angles.iter().map(|a| (a.to_radians()).sin()).collect();
 
-    let mut spectrum_vibrations = Array2::<f64>::zeros((N_ANGLES, n_speeds));
+    let mut spectrum_vibrations = Array2::<f64>::zeros((n_angles, n_speeds));
 
-    for ai in 0..N_ANGLES {
+    for ai in 0..n_angles {
         let cos_val = cos_vals[ai];
         let sin_val = sin_vals[ai];
         for si in 0..n_speeds {
@@ -155,17 +160,40 @@ mod tests {
         let vibs_a = vec![0.1, 0.2, 0.3, 0.1];
         let vibs_b = vec![0.2, 0.1, 0.2, 0.3];
         let (angles, out_speeds, vib) =
-            compute_dir_speed_spectrogram(&speeds, &vibs_a, &vibs_b, false).unwrap();
+            compute_dir_speed_spectrogram(&speeds, &vibs_a, &vibs_b, false, 720, 6).unwrap();
         assert_eq!(angles.len(), 720);
         assert_eq!(out_speeds.len(), speeds.len() * 6);
         assert_eq!(vib.shape(), &[720, speeds.len() * 6]);
     }
 
     #[test]
+    fn output_shapes_at_finer_grid() {
+        // The shipped default grid (1440 angles, 12x speed oversampling): shapes must scale
+        // exactly with the passed-in parameters, independent of any hardcoded constant.
+        let speeds = vec![10.0, 20.0, 30.0, 40.0];
+        let vibs_a = vec![0.1, 0.2, 0.3, 0.1];
+        let vibs_b = vec![0.2, 0.1, 0.2, 0.3];
+        let (angles, out_speeds, vib) =
+            compute_dir_speed_spectrogram(&speeds, &vibs_a, &vibs_b, false, 1440, 12).unwrap();
+        assert_eq!(angles.len(), 1440);
+        assert_eq!(out_speeds.len(), speeds.len() * 12);
+        assert_eq!(vib.shape(), &[1440, speeds.len() * 12]);
+    }
+
+    #[test]
     fn fewer_than_two_speeds_errors_instead_of_panicking() {
         // m == 1 used to hit `.clamp(1, 0)` (a panic); it must now surface as an Err so the
         // Python dispatch site falls back to the original implementation.
-        assert!(compute_dir_speed_spectrogram(&[100.0], &[1.0], &[1.0], false).is_err());
-        assert!(compute_dir_speed_spectrogram(&[], &[], &[], true).is_err());
+        assert!(compute_dir_speed_spectrogram(&[100.0], &[1.0], &[1.0], false, 720, 6).is_err());
+        assert!(compute_dir_speed_spectrogram(&[], &[], &[], true, 720, 6).is_err());
+    }
+
+    #[test]
+    fn fewer_than_two_angles_errors_instead_of_panicking() {
+        let speeds = vec![10.0, 20.0, 30.0, 40.0];
+        let vibs_a = vec![0.1, 0.2, 0.3, 0.1];
+        let vibs_b = vec![0.2, 0.1, 0.2, 0.3];
+        assert!(compute_dir_speed_spectrogram(&speeds, &vibs_a, &vibs_b, false, 1, 6).is_err());
+        assert!(compute_dir_speed_spectrogram(&speeds, &vibs_a, &vibs_b, false, 0, 6).is_err());
     }
 }

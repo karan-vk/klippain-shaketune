@@ -34,28 +34,29 @@ class ShakeTuneProcess:
     def get_st_config(self):
         return self._config
 
-    def run(self, filenames: Union[Path, List[Path]]) -> None:
+    def run(self, filenames: Optional[Union[Path, List[Path]]] = None) -> None:
         filelist = []
 
-        # Single .stdata or a legacy .csv file
-        if isinstance(filenames, Path):
-            if filenames.suffix not in ('.stdata', '.csv'):
-                filenames = filenames.with_suffix('.stdata')
-            if not filenames.exists():
-                raise FileNotFoundError(f'File {filenames} does not exist!')
-            filelist.append(filenames)
+        if filenames is not None:
+            # Single .stdata or a legacy .csv file
+            if isinstance(filenames, Path):
+                if filenames.suffix not in ('.stdata', '.csv'):
+                    filenames = filenames.with_suffix('.stdata')
+                if not filenames.exists():
+                    raise FileNotFoundError(f'File {filenames} does not exist!')
+                filelist.append(filenames)
 
-        # List of legacy .csv files (still supported to be able to use CSVs when using the CLI mode)
-        if isinstance(filenames, List):
-            extensions = {f.suffix for f in filenames}
-            if len(extensions) > 1:
-                raise ValueError('Mixed file types are not allowed! Please provide Klipper CSV files only.')
-            for filename in filenames:
-                if filename.suffix != '.csv':
-                    filename = filename.with_suffix('.csv')
-                if not filename.exists():
-                    raise FileNotFoundError(f'File {filename} does not exist!')
-                filelist.append(filename)
+            # List of legacy .csv files (still supported to be able to use CSVs when using the CLI mode)
+            if isinstance(filenames, List):
+                extensions = {f.suffix for f in filenames}
+                if len(extensions) > 1:
+                    raise ValueError('Mixed file types are not allowed! Please provide Klipper CSV files only.')
+                for filename in filenames:
+                    if filename.suffix != '.csv':
+                        filename = filename.with_suffix('.csv')
+                    if not filename.exists():
+                        raise FileNotFoundError(f'File {filename} does not exist!')
+                    filelist.append(filename)
 
         # Start the target function in a new process (a thread is known to cause issues with Klipper and CANbus due to the GIL)
         self._process = Process(
@@ -107,17 +108,19 @@ class ShakeTuneProcess:
         except Exception:
             ConsoleOutput.print('Warning: failed reducing Shake&Tune process priority, continuing...')
 
-        # Load the measurements from the file
+        # Load the measurements from the file (if any were provided). Some graph creators, such as
+        # the metrics-history-based ones, don't need any recorded measurements to run at all.
         m_manager = MeasurementsManager(self._config.chunk_size, self._reactor)
-        if filelist[0].suffix == '.stdata':
-            m_manager.load_from_stdata(filelist[0])
-        else:
-            m_manager.load_from_csvs(filelist)
+        if filelist:
+            if filelist[0].suffix == '.stdata':
+                m_manager.load_from_stdata(filelist[0])
+            else:
+                m_manager.load_from_csvs(filelist)
 
-        # Check if there are any measurements to process
-        if m_manager.get_measurements() is None or len(m_manager.get_measurements()) == 0:
-            ConsoleOutput.print('Error: no measurements available to create the graphs!')
-            return
+            # Check if there are any measurements to process
+            if m_manager.get_measurements() is None or len(m_manager.get_measurements()) == 0:
+                ConsoleOutput.print('Error: no measurements available to create the graphs!')
+                return
 
         # Generate the graphs
         try:

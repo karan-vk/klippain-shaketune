@@ -42,6 +42,16 @@ def configure_graph_creator(graph_type, args, dummy_config):
         }
     elif graph_type == 'vibrations profile':
         config_kwargs |= {'kinematics': args.kinematics, 'accel': args.accel}
+    elif graph_type == 'trend':
+        config_kwargs |= {
+            'last_n': getattr(args, 'last_n', None),
+            'history_file': Path(args.history) if getattr(args, 'history', None) else None,
+        }
+    elif graph_type == 'healthcheck':
+        config_kwargs |= {
+            'mode': getattr(args, 'mode', None) or 'check',
+            'baseline_file': Path(args.baseline) if getattr(args, 'baseline', None) else None,
+        }
 
     graph_creator.configure(**config_kwargs)
     return graph_creator
@@ -119,6 +129,21 @@ def main():
     vibrations_parser.add_argument('--kinematics', required=True, default='cartesian', help='Used kinematics')
     vibrations_parser.add_argument('--accel', type=int, help='Accel value to be printed on the graph')
 
+    # Healthcheck graph parser: needs a .stdata with axis_X/axis_Y measurements (like
+    # COMPARE_BELTS_RESPONSES writes one shared file), reusing the same PSD math as belts/shaper
+    healthcheck_parser = subparsers.add_parser('healthcheck', help='Create a healthcheck graph (current vs baseline)')
+    add_common_arguments(healthcheck_parser)
+    healthcheck_parser.add_argument('-k', '--klipper_dir', default='~/klipper', help='Main klipper directory')
+    healthcheck_parser.add_argument('--mode', choices=['baseline', 'check'], default='check', help='Healthcheck mode')
+    healthcheck_parser.add_argument('--baseline', help='Path to the healthcheck baseline JSON file')
+
+    # Trend graph parser (no accelerometer data involved: reads back the metrics history instead)
+    trend_parser = subparsers.add_parser('trend', help='Create a metrics-history trend graph')
+    trend_parser.add_argument('-o', '--output', required=True, help='Output filename')
+    trend_parser.add_argument('--history', help='Path to a history.jsonl file (defaults to the Shake&Tune history)')
+    trend_parser.add_argument('--last_n', type=int, help='Only use the last N recorded runs')
+    trend_parser.add_argument('--dpi', type=int, help='DPI value to use for the graph')
+
     args = parser.parse_args()
 
     if args.graph_type is None:
@@ -131,6 +156,8 @@ def main():
         'belts': 'belts comparison',
         'input_shaper': 'input shaper',
         'vibrations': 'vibrations profile',
+        'trend': 'trend',
+        'healthcheck': 'healthcheck',
     }
     graph_type = graph_type_map[args.graph_type]
 
@@ -138,7 +165,7 @@ def main():
     dummy_config = ShakeTuneConfig()
     if args.dpi is not None:
         dummy_config.dpi = args.dpi
-    if args.max_freq is not None:
+    if getattr(args, 'max_freq', None) is not None:
         if graph_type == 'vibrations profile':
             dummy_config.max_freq_vibrations = args.max_freq
         else:
@@ -154,6 +181,13 @@ def main():
     graph_creator.define_output_target(output_filepath)
 
     print(f'Creating {graph_type} graph...')
+
+    # The trend graph has no accelerometer data of its own: it reads back the metrics history
+    # instead, so it needs no input files at all
+    if graph_type == 'trend':
+        graph_creator.create_graph(MeasurementsManager(10))
+        print('...done!')
+        return
 
     # Load measurements
     measurements_manager = MeasurementsManager(10)

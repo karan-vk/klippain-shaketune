@@ -22,6 +22,7 @@ class GraphCreator(abc.ABC):
     """Base class for graph creators using composition-based architecture"""
 
     registry = {}
+    writes_history: bool = True
 
     @classmethod
     def register(cls, graph_type: str):
@@ -62,6 +63,23 @@ class GraphCreator(abc.ABC):
         result = computation.compute()
         fig = self._plotter.plot(result)
         self._save_figure(fig)
+        if self.writes_history:
+            self._save_summary(result)
+
+    def _save_summary(self, result) -> None:
+        """Persist the computation result's JSON-safe summary next to the output file and
+        append it to the run history. Never raises: a metrics failure (including a buggy
+        get_summary() implementation) must never fail the graph it's attached to"""
+        from ..helpers.console_output import ConsoleOutput
+        from ..helpers.metrics_store import write_run_artifacts
+
+        try:
+            summary = result.get_summary()
+        except Exception as e:
+            ConsoleOutput.print(f'Warning: unable to compute Shake&Tune metrics summary: {e}')
+            return
+
+        write_run_artifacts(self._output_target, self._config, self._type, summary)
 
     def _save_figure(self, fig: Figure) -> None:
         """Save the figure to disk"""
@@ -97,4 +115,5 @@ class GraphCreator(abc.ABC):
         for old_png_file in files[keep_results:]:
             stdata_file = old_png_file.with_suffix('.stdata')
             stdata_file.unlink(missing_ok=True)
+            old_png_file.with_suffix('.json').unlink(missing_ok=True)
             old_png_file.unlink()

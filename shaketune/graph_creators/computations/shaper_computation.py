@@ -63,6 +63,7 @@ class ShaperComputation:
             fr,
             zeta,
             compat,
+            zeta_measured,
         ) = self._calibrate_shaper(datas[0], self.max_smoothing, self.scv, self.max_freq)
         pdata, bins, t = compute_spectrogram(datas[0])
         del datas
@@ -97,6 +98,7 @@ class ShaperComputation:
             'shapers': [],
             'recommendations': [],
             'damping_ratio': zeta,
+            'damping_ratio_measured': zeta_measured,
         }
 
         perf_shaper_choice = None
@@ -160,6 +162,25 @@ class ShaperComputation:
             shaper_choices = [k_shaper_choice.upper()]
             ConsoleOutput.print(f'{shaper_string} (with a damping ratio of {zeta:.3f})')
 
+        # Structured, ready-to-apply recommendations (used by the parent process to print a
+        # copy-pasteable [input_shaper] config block and, optionally, to APPLY it via SET_INPUT_SHAPER)
+        low_vibration_shaper = {
+            'type': k_shaper_choice.lower(),
+            'freq': float(klipper_shaper_freq),
+            'max_accel': float(klipper_shaper_accel),
+        }
+        performance_shaper = None
+        if (
+            perf_shaper_choice is not None
+            and perf_shaper_choice != k_shaper_choice
+            and perf_shaper_accel >= klipper_shaper_accel
+        ):
+            performance_shaper = {
+                'type': perf_shaper_choice.lower(),
+                'freq': float(perf_shaper_freq),
+                'max_accel': float(perf_shaper_accel),
+            }
+
         # Create metadata
         metadata = GraphMetadata(
             title='INPUT SHAPER CALIBRATION TOOL',
@@ -193,6 +214,9 @@ class ShaperComputation:
             max_scale=self.max_scale,
             compat=compat,
             max_smoothing_computed=max_smoothing_computed,
+            damping_ratio_measured=zeta_measured,
+            low_vibration_shaper=low_vibration_shaper,
+            performance_shaper=performance_shaper,
         )
 
     def _calibrate_shaper(self, datas: np.ndarray, max_smoothing: Optional[float], scv: float, max_freq: float):
@@ -203,6 +227,7 @@ class ShaperComputation:
 
         # We compute the damping ratio using the Klipper's default value if it fails
         fr, zeta, _, _ = compute_mechanical_parameters(calib_data.psd_sum, calib_data.freq_bins)
+        zeta_measured = zeta is not None
         zeta = zeta if zeta is not None else 0.1
 
         # First we find the best shapers using the Klipper's standard algorithms. This will give us Klipper's
@@ -264,4 +289,5 @@ class ShaperComputation:
             fr,
             zeta,
             compat,
+            zeta_measured,
         )

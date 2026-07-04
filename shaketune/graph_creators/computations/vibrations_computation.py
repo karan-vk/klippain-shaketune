@@ -9,12 +9,12 @@
 import math
 import os
 import re
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from ...helpers.accelerometer import Measurement
-from ...helpers.common_func import compute_mechanical_parameters, detect_peaks, identify_low_energy_zones
+from ...helpers.common_func import compute_mechanical_parameters, detect_peaks, identify_low_energy_zones, trapezoid
 from ...helpers.console_output import ConsoleOutput
 from ...helpers.motors_config_parser import Motor
 from .. import get_shaper_calibrate_module, process_accelerometer_data_compat
@@ -27,6 +27,51 @@ CURVE_SIMILARITY_SIGMOID_K = 0.5
 SPEEDS_VALLEY_DETECTION_THRESHOLD = 0.7  # Lower is more sensitive
 SPEEDS_AROUND_PEAK_DELETION = 3  # to delete +-3mm/s around a peak
 ANGLES_VALLEY_DETECTION_THRESHOLD = 1.1  # Lower is more sensitive
+
+# Directional speed spectrogram grid resolution. This is the single source of truth for both the
+# native (Rust) and pure-Python code paths: it's passed through the FFI on every native call so a
+# stale native binary (built against an older, hardcoded grid) can never silently produce a
+# differently-shaped result than the Python fallback -- an old 4-arg binary simply raises
+# TypeError, which the existing dispatch `except Exception` already routes to the Python fallback
+# computed at THIS (new) resolution.
+#
+# All index-unit smoothing windows below (_compute_angle_powers, _compute_speed_powers,
+# detect_peaks) are then rescaled by the exact ratio of new/old index counts so that the PHYSICAL
+# smoothing width (in degrees or mm/s) stays exactly the same as before: same smoothing physics,
+# same detected peak count -- only the zone boundaries get reported at finer granularity.
+N_ANGLES = 1440
+SPEED_OVERSAMPLING = 12
+_REFERENCE_N_ANGLES = 720
+_REFERENCE_SPEED_OVERSAMPLING = 6
+
+# stealthChop->spreadCycle transition is only flagged as a likely cause of extra vibrations when the
+# energy difference across it is large: this is a causal claim, so we're deliberately conservative here
+STEALTHCHOP_ENERGY_RATIO_THRESHOLD = 1.6  # require >=60% more mean energy on one side of the transition
+STEALTHCHOP_RANGE_MARGIN_FRACTION = 0.10  # transition must sit >=10% of the tested-speed span inside the range
+
+
+def _round_to_odd(x: float) -> int:
+    """Round to the nearest integer, then bump up to the next odd number if needed (convolution
+    kernels and padding widths need an odd size to stay centered)"""
+    n = max(1, int(round(x)))
+    return n if n % 2 == 1 else n + 1
+
+
+def _angle_window_ratio() -> float:
+    """Ratio of new/old angle index counts, used to rescale angle-domain smoothing windows so
+    their PHYSICAL (degrees) width stays constant regardless of N_ANGLES. Reads the module
+    globals at call time (rather than capturing them at import time) so tests can monkeypatch
+    N_ANGLES/_REFERENCE_N_ANGLES."""
+    return (N_ANGLES - 1) / (_REFERENCE_N_ANGLES - 1)
+
+
+def _speed_window_ratio(m: int) -> float:
+    """Ratio of new/old speed index counts for a test with `m` measured speeds, used to rescale
+    speed-domain smoothing windows so their PHYSICAL (mm/s) width stays constant regardless of
+    SPEED_OVERSAMPLING. Reads the module globals at call time so tests can monkeypatch them."""
+    old = m * _REFERENCE_SPEED_OVERSAMPLING
+    new = m * SPEED_OVERSAMPLING
+    return 1.0 if old <= 1 else (new - 1) / (old - 1)
 
 
 class VibrationsComputation:
@@ -88,7 +133,7 @@ class VibrationsComputation:
 
             # Store the interpolated PSD and integral values
             psds[angle][speed] = np.interp(target_freqs, first_freqs, psd_sum)
-            psds_sum[angle][speed] = np.trapz(psd_sum, first_freqs)
+            psds_sum[angle][speed] = trapezoid(psd_sum, first_freqs)
 
         measured_angles = sorted(psds_sum.keys())
         measured_speeds = sorted({speed for angle_speeds in psds_sum.values() for speed in angle_speeds.keys()})
@@ -102,8 +147,14 @@ class VibrationsComputation:
             measured_speeds, psds_sum, self.kinematics, main_angles
         )
         all_angles_energy = self._compute_angle_powers(spectrogram_data)
+        # The speed grid is per-test (m depends on how many speeds were measured), so the
+        # smoothing/detection windows below are rescaled at runtime from m rather than hardcoded,
+        # pinning their PHYSICAL (mm/s) width to what they were at the reference oversampling
+        # factor (6x -> smoothing_window=15, detect_peaks window/vicinity=10).
+        m = len(measured_speeds)
+        speed_ratio = _speed_window_ratio(m)
         sp_min_energy, sp_max_energy, sp_variance_energy, vibration_metric = self._compute_speed_powers(
-            spectrogram_data
+            spectrogram_data, smoothing_window=_round_to_odd(15 * speed_ratio)
         )
         motor_profiles, global_motor_profile = self._compute_motor_profiles(
             target_freqs, psds, all_angles_energy, main_angles
@@ -114,13 +165,14 @@ class VibrationsComputation:
 
         # Analyze low variance ranges of vibration energy across all angles for each speed to identify clean speeds
         # and highlight them. Also find the peaks to identify speeds to avoid due to high resonances
+        detect_peaks_window = max(1, int(round(10 * speed_ratio)))
         num_peaks, vibration_peaks, peaks_speeds = detect_peaks(
             vibration_metric,
             all_speeds,
             PEAKS_DETECTION_THRESHOLD * vibration_metric.max(),
             PEAKS_RELATIVE_HEIGHT_THRESHOLD,
-            10,
-            10,
+            detect_peaks_window,
+            detect_peaks_window,
         )
         formated_peaks_speeds = ['{:.1f}'.format(pspeed) for pspeed in peaks_speeds]
         ConsoleOutput.print(
@@ -153,9 +205,18 @@ class VibrationsComputation:
         if self.motors is not None and len(self.motors) == 2:
             motors_config_differences = self.motors[0].compare_to(self.motors[1])
             if motors_config_differences is not None and self.kinematics in {'corexy', 'limited_corexy'}:
-                ConsoleOutput.print(f'Warning: motors have different TMC configurations!\n{motors_config_differences}')
+                ConsoleOutput.print(
+                    f'Warning: motors have different TMC configurations! Differing: '
+                    f'{self._format_motor_diff(motors_config_differences)}'
+                )
         else:
             motors_config_differences = None
+
+        # Check if the stealthChop->spreadCycle transition threshold falls inside the tested speed
+        # range and correlates with a significant vibration energy jump across it
+        stealthchop_findings = self._check_stealthchop_transitions(all_speeds, sp_max_energy)
+        for finding in stealthchop_findings:
+            ConsoleOutput.print(finding['message'])
 
         # Compute mechanical parameters and check the main resonant frequency of motors
         motor_fr, motor_zeta, motor_res_idx, lowfreq_max = compute_mechanical_parameters(
@@ -215,6 +276,7 @@ class VibrationsComputation:
             motor_fr=motor_fr,
             motor_zeta=motor_zeta,
             motor_res_idx=motor_res_idx,
+            stealthchop_findings=stealthchop_findings,
         )
 
     def _compute_motor_profiles(
@@ -245,7 +307,7 @@ class VibrationsComputation:
                 all_angles_energy[angle] ** energy_amplification_factor
             )  # First weighting factor is based on the total vibrations of the machine at the specified angle
             curve_area = (
-                np.trapz(motor_profiles[angle], freqs) ** energy_amplification_factor
+                trapezoid(motor_profiles[angle], freqs) ** energy_amplification_factor
             )  # Additional weighting factor is based on the area under the current motor profile at this specified angle
             total_angle_weight = angle_energy * curve_area
 
@@ -292,13 +354,15 @@ class VibrationsComputation:
             vibs_b = np.array([data[a1].get(s, 0.0) for s in measured_speeds], dtype=np.float64)
             corexy = kinematics in {'corexy', 'limited_corexy'}
             try:
-                return nat.dir_speed_spectrogram(ms, vibs_a, vibs_b, corexy)
+                return nat.dir_speed_spectrogram(ms, vibs_a, vibs_b, corexy, N_ANGLES, SPEED_OVERSAMPLING)
             except Exception:
                 pass  # fall through to the pure-Python implementation below
 
         # We want to project the motor vibrations measured on their own axes on the [0, 360] range
-        spectrum_angles = np.linspace(0, 360, 720)  # One point every 0.5 degrees
-        spectrum_speeds = np.linspace(min(measured_speeds), max(measured_speeds), len(measured_speeds) * 6)
+        spectrum_angles = np.linspace(0, 360, N_ANGLES)
+        spectrum_speeds = np.linspace(
+            min(measured_speeds), max(measured_speeds), len(measured_speeds) * SPEED_OVERSAMPLING
+        )
         spectrum_vibrations = np.zeros((len(spectrum_angles), len(spectrum_speeds)))
 
         def get_interpolated_vibrations(data: dict, speed: float, speeds: List[float]) -> float:
@@ -335,15 +399,23 @@ class VibrationsComputation:
 
     def _compute_angle_powers(self, spectrogram_data: np.ndarray) -> np.ndarray:
         """Compute angle powers from spectrogram data"""
-        angles_powers = np.trapz(spectrogram_data, axis=1)
+        angles_powers = trapezoid(spectrogram_data, axis=1)
+
+        # The kernel width and padding below are rescaled by the angle-grid ratio so their
+        # PHYSICAL (degrees) width stays exactly the same as at the reference resolution (720
+        # angles -> kernel_width=15, pad=9); at N_ANGLES == _REFERENCE_N_ANGLES the ratio is 1.0
+        # and these are bit-identical to the original hardcoded values.
+        ratio = _angle_window_ratio()
+        kernel_width = _round_to_odd(15 * ratio)
+        pad = max(kernel_width // 2, int(round(9 * ratio)))
 
         # Since we want to plot it on a continuous polar plot later on, we need to append parts of
         # the array to start and end of it to smooth transitions when doing the convolution
         # and get the same value at modulo 360. Then we return the array without the extras
-        extended_angles_powers = np.concatenate([angles_powers[-9:], angles_powers, angles_powers[:9]])
-        convolved_extended = np.convolve(extended_angles_powers, np.ones(15) / 15, mode='same')
+        extended_angles_powers = np.concatenate([angles_powers[-pad:], angles_powers, angles_powers[:pad]])
+        convolved_extended = np.convolve(extended_angles_powers, np.ones(kernel_width) / kernel_width, mode='same')
 
-        return convolved_extended[9:-9]
+        return convolved_extended[pad:-pad]
 
     def _compute_speed_powers(self, spectrogram_data: np.ndarray, smoothing_window: int = 15) -> np.ndarray:
         """Compute speed powers from spectrogram data"""
@@ -372,6 +444,76 @@ class VibrationsComputation:
         smoothed_arrays = np.array([pad_and_smooth(data) for data in data_arrays])
 
         return smoothed_arrays
+
+    def _check_stealthchop_transitions(self, all_speeds: np.ndarray, sp_max_energy: np.ndarray) -> List[Dict[str, Any]]:
+        """Correlate each motor's stealthChop->spreadCycle transition velocity (when known) with the
+        measured vibration energy to flag transitions that likely add vibrations in the tested range"""
+        if self.motors is None:
+            return []
+
+        findings = []
+        span = float(all_speeds.max() - all_speeds.min())
+        if span <= 0:
+            return []
+
+        margin = STEALTHCHOP_RANGE_MARGIN_FRACTION * span
+        lo = all_speeds.min() + margin
+        hi = all_speeds.max() - margin
+
+        for motor in self.motors:
+            v_thr = motor.get_config('stealthchop_threshold_mm_s')
+            if v_thr is None or not math.isfinite(v_thr) or not (lo <= v_thr <= hi):
+                continue
+
+            idx = int(np.searchsorted(all_speeds, v_thr))
+            if idx <= 0 or idx >= len(all_speeds):
+                continue
+
+            energy_below = float(np.mean(sp_max_energy[:idx]))
+            energy_above = float(np.mean(sp_max_energy[idx:]))
+            lo_e, hi_e = min(energy_below, energy_above), max(energy_below, energy_above)
+            if lo_e <= 0 or hi_e / lo_e < STEALTHCHOP_ENERGY_RATIO_THRESHOLD:
+                continue
+
+            ratio = hi_e / lo_e
+            if energy_above > energy_below:
+                worse_side = 'spreadCycle (above the transition)'
+                advice = (
+                    f'consider stealthchop_threshold: 0 (spreadCycle always) or lowering it below '
+                    f'{all_speeds.min():.0f} mm/s'
+                )
+            else:
+                worse_side = 'stealthChop (below the transition)'
+                advice = (
+                    f'consider raising stealthchop_threshold above {all_speeds.max():.0f} mm/s '
+                    f'(stealthChop always) or below {v_thr:.0f} mm/s'
+                )
+
+            msg = (
+                f'{motor.name}: stealthChop->spreadCycle transition at ~{v_thr:.0f} mm/s lies inside your '
+                f'tested speed range and vibration energy is {ratio:.1f}x higher on the {worse_side} side; {advice}'
+            )
+            findings.append(
+                {
+                    'motor': motor.name,
+                    'threshold_mm_s': float(v_thr),
+                    'energy_ratio': float(ratio),
+                    'worse_side': worse_side,
+                    'message': msg,
+                }
+            )
+
+        return findings
+
+    def _format_motor_diff(self, differences: Dict[str, Dict[str, Any]]) -> str:
+        """Flatten a Motor.compare_to() diff dict into a short, human-readable comma-joined list"""
+        parts = []
+        for key, value in differences.get('config', {}).items():
+            parts.append(f'{key}={value}')
+        for register, reg_diffs in differences.get('registers', {}).items():
+            for field_name, value in reg_diffs.items():
+                parts.append(f'{register}.{field_name}={value}')
+        return ', '.join(parts) if parts else 'unknown'
 
     def _filter_and_split_ranges(
         self,

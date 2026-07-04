@@ -9,6 +9,7 @@
 
 from datetime import datetime
 
+from ..helpers import metrics_store
 from ..helpers.accelerometer import Accelerometer, MeasurementsManager
 from ..helpers.common_func import AXIS_CONFIG
 from ..helpers.compat import KlipperCompatibility
@@ -120,3 +121,4 @@ def excitate_axis_at_freq(gcmd, klipper_config, st_process: ShakeTuneProcess) ->
         measurements_manager.save_stdata()
         st_process.run(filename)
         st_process.wait_for_completion()
+        metrics_store.print_run_summary(st_process.get_st_config(), filename, creator.get_type())

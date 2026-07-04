@@ -8,14 +8,18 @@
 
 from .axes_map_plotter import AxesMapPlotter
 from .belts_plotter import BeltsPlotter
+from .healthcheck_plotter import HealthCheckPlotter
 from .shaper_plotter import ShaperPlotter
 from .static_frequency_plotter import StaticFrequencyPlotter
+from .trend_plotter import TrendPlotter
 from .vibrations_plotter import VibrationsPlotter
 
 __all__ = [
     'AxesMapPlotter',
     'BeltsPlotter',
+    'HealthCheckPlotter',
     'ShaperPlotter',
     'StaticFrequencyPlotter',
+    'TrendPlotter',
     'VibrationsPlotter',
 ]

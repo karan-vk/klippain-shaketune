@@ -166,3 +166,6 @@ uv.lock
 # Shake&Tune native (Rust/PyO3) build artifacts
 rust/target/
 shaketune/native/lib/dev/
+
+# Generated parity-test corpus (produced by tests/parity/gen_corpus.py)
+tests/parity/_corpus/

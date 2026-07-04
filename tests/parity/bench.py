@@ -78,10 +78,24 @@ def bench_kernel1(corpus_dir):
     ms = np.ascontiguousarray(d['speeds'], dtype=np.float64)
     va = np.ascontiguousarray(d['values'][0], dtype=np.float64)
     vb = np.ascontiguousarray(d['values'][1], dtype=np.float64)
+    # Bench at the shipped default (1440 angles, 12x speed oversampling). The pure-Python
+    # reference is a nested angle*speed loop, so benching the legacy (720, 6) grid as well would
+    # roughly triple total runtime for little extra signal -- skip it (the parity check in
+    # run_parity.py already covers that grid for correctness).
+    n_angles, speed_oversampling = 1440, 12
     for corexy in (False, True):
-        native_s = timeit(lambda c=corexy: nm.dir_speed_spectrogram(ms, va, vb, c), repeats=5)
-        py_s = timeit(lambda c=corexy: reference_dir_speed_spectrogram(ms, va, vb, c), repeats=3)
-        report('kernel1 vibrations proj', 'corexy' if corexy else 'cartesian', native_s, py_s)
+        native_s = timeit(
+            lambda c=corexy: nm.dir_speed_spectrogram(ms, va, vb, c, n_angles, speed_oversampling), repeats=5
+        )
+        py_s = timeit(
+            lambda c=corexy: reference_dir_speed_spectrogram(ms, va, vb, c, n_angles, speed_oversampling), repeats=3
+        )
+        report(
+            'kernel1 vibrations proj',
+            f'{"corexy" if corexy else "cartesian"} {n_angles}x{speed_oversampling}',
+            native_s,
+            py_s,
+        )
 
 
 def bench_kernel2(corpus_dir):

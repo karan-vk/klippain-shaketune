@@ -19,6 +19,8 @@ from .commands import (
     compare_belts_responses,
     create_vibrations_profile,
     excitate_axis_at_freq,
+    healthcheck,
+    render_trend,
 )
 from .graph_creators import GraphCreatorFactory
 from .helpers.console_output import ConsoleOutput
@@ -49,6 +51,11 @@ ST_COMMANDS = {
     'CREATE_VIBRATIONS_PROFILE': (
         'Run a series of motions to find speed/angle ranges where the printer could be '
         'exposed to VFAs to optimize your slicer speed profiles and TMC driver parameters'
+    ),
+    'SHAKETUNE_TREND': 'Render graphs of how your calibration metrics evolve over time from the Shake&Tune history',
+    'SHAKETUNE_HEALTHCHECK': (
+        'Run a quick per-axis resonance sweep and compare it to a stored baseline to catch mechanical drift '
+        '(MODE=BASELINE to capture, MODE=CHECK to compare)'
     ),
 }
 
@@ -96,6 +103,8 @@ class ShakeTune:
             ('COMPARE_BELTS_RESPONSES', self.cmd_COMPARE_BELTS_RESPONSES, ST_COMMANDS['COMPARE_BELTS_RESPONSES']),
             ('AXES_SHAPER_CALIBRATION', self.cmd_AXES_SHAPER_CALIBRATION, ST_COMMANDS['AXES_SHAPER_CALIBRATION']),
             ('CREATE_VIBRATIONS_PROFILE', self.cmd_CREATE_VIBRATIONS_PROFILE, ST_COMMANDS['CREATE_VIBRATIONS_PROFILE']),
+            ('SHAKETUNE_TREND', self.cmd_SHAKETUNE_TREND, ST_COMMANDS['SHAKETUNE_TREND']),
+            ('SHAKETUNE_HEALTHCHECK', self.cmd_SHAKETUNE_HEALTHCHECK, ST_COMMANDS['SHAKETUNE_HEALTHCHECK']),
         ]
 
         # Register Shake&Tune's measurement commands using the official Klipper API (gcode.register_command)
@@ -180,3 +189,9 @@ class ShakeTune:
 
     def cmd_CREATE_VIBRATIONS_PROFILE(self, gcmd) -> None:
         self._cmd_helper(gcmd, 'vibrations profile', create_vibrations_profile)
+
+    def cmd_SHAKETUNE_TREND(self, gcmd) -> None:
+        self._cmd_helper(gcmd, 'trend', render_trend)
+
+    def cmd_SHAKETUNE_HEALTHCHECK(self, gcmd) -> None:
+        self._cmd_helper(gcmd, 'healthcheck', healthcheck)
