@@ -125,6 +125,14 @@ def create_vibrations_profile(gcmd, config, st_process: ShakeTuneProcess) -> Non
             dX = (size / 2) * math.cos(radian_angle) * segment_length_multiplier
             dY = (size / 2) * math.sin(radian_angle) * segment_length_multiplier
             toolhead.move([mid_x - dX, mid_y - dY, z_height, E], feedrate_travel)
+            # Fully flush the travel move before start_recording below: recording setup can block
+            # for a while (writer chunk flush, and the writer-process fork on the very first call).
+            # Without this wait that pause races the travel move draining from the motion buffer;
+            # if the pause outlasts the move, Klipper's timeline isn't re-primed and the sweep's
+            # first steps are emitted with near-zero scheduling lead -> "MCU: Timer too close" on
+            # serial-connected boards. Formally idling the queue here lets Klipper restart motion
+            # with its normal safety lead.
+            toolhead.wait_moves()
 
             # Adjust the number of back and forth movements based on speed to also save time on lower speed range
             # 3 movements are done by default, reduced to 2 between 150-250mm/s and to 1 under 150mm/s.

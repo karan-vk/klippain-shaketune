@@ -25,6 +25,40 @@ from zstandard import FLUSH_FRAME, ZstdCompressor, ZstdDecompressor
 
 from ..helpers.console_output import ConsoleOutput
 
+
+def close_inherited_serial_fds() -> None:
+    """Shake&Tune forks child processes (the measurement writer and the graph worker) while
+    Klipper's serial ports are open, so the children inherit those file descriptors and keep
+    holding Klipper's exclusive serial lock. If Klipper then crashes/restarts while a child is
+    still alive, it cannot re-open the MCU port ('Could not exclusively lock port ... Resource
+    temporarily unavailable') until the child exits. Closing the inherited tty/serial fds right
+    after fork makes the children lock-neutral. Best-effort and never raises."""
+    try:
+        for fd_name in os.listdir('/proc/self/fd'):
+            try:
+                target = os.readlink(f'/proc/self/fd/{fd_name}')
+            except OSError:
+                continue
+            if target.startswith(('/dev/tty', '/dev/serial')):
+                try:
+                    os.close(int(fd_name))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
+def _lower_process_priority() -> None:
+    """Drop a forked child to low-priority batch scheduling so its (CPU-heavy) work doesn't
+    compete with Klipper's real-time reactor on the shared host. Best-effort, never raises."""
+    try:
+        os.nice(19)
+        param = os.sched_param(os.sched_get_priority_min(os.SCHED_BATCH))
+        os.sched_setscheduler(0, os.SCHED_BATCH, param)
+    except Exception:
+        pass
+
+
 Sample = Tuple[float, float, float, float]
 SamplesList = Union[List[Sample], 'np.ndarray']
 
@@ -67,6 +101,12 @@ class MeasurementsManager:
     # new compact binary ".stdata" v2 format (via the native StdataWriter); otherwise it falls back
     # to the legacy JSON-lines format wrapped in a Zstandard compressor stream.
     def _writer_loop(self, output_file: Path, write_queue: Queue, is_writing: Value):
+        # This runs in a forked child: release Klipper's inherited serial fds so we don't hold its
+        # exclusive MCU lock across a Klipper restart, and drop to low-priority batch scheduling so
+        # the zstd compression here can't compete with Klipper's real-time reactor.
+        close_inherited_serial_fds()
+        _lower_process_priority()
+
         nat = None
         try:
             from ..native import get_native

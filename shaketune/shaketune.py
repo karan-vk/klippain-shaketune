@@ -8,6 +8,7 @@
 #              loading of the plugin, and the registration of the tuning commands
 
 
+import gc
 import importlib
 import os
 from pathlib import Path
@@ -173,7 +174,40 @@ class ShakeTune:
             gcreator,
             self.timeout,
         )
-        cmd_function(gcmd, self._config, st_process)
+
+        # Klipper disables Python's automatic GC and instead runs gc.collect() opportunistically
+        # when its reactor looks idle. During a measurement, many sample/intermediate objects are
+        # alive, so such a collection can take a noticeable time on a slow SBC and freeze the host
+        # mid-motion, starving the MCUs ("MCU: Timer too close"). Our ndarray sample storage keeps
+        # the live object count low, but as belt-and-suspenders we suspend the reactor's
+        # opportunistic GC for the duration of the command and collect explicitly at safe
+        # boundaries instead (refcounting still frees the bulk immediately; only cyclic garbage
+        # waits for the collects below). All reactor-internal pokes are guarded since the private
+        # attribute isn't guaranteed across Klipper/Kalico versions.
+        reactor = self._printer.get_reactor()
+        gc.collect()  # start clean while nothing is moving yet
+        gc_was_checking = getattr(reactor, '_gc_checking', None)
+        if gc_was_checking is not None:
+            try:
+                reactor._gc_checking = False
+            except Exception:
+                gc_was_checking = None
+        try:
+            cmd_function(gcmd, self._config, st_process)
+        finally:
+            if gc_was_checking is not None:
+                try:
+                    reactor._gc_checking = gc_was_checking
+                except Exception:
+                    pass
+            # Collect generation by generation, yielding to the reactor between each so no single
+            # pause is long now that motion has finished.
+            for _gen in (0, 1, 2):
+                gc.collect(_gen)
+                try:
+                    reactor.pause(reactor.monotonic() + 0.1)
+                except Exception:
+                    pass
 
     def cmd_EXCITATE_AXIS_AT_FREQ(self, gcmd) -> None:
         self._cmd_helper(gcmd, 'static frequency', excitate_axis_at_freq)

@@ -15,7 +15,7 @@ from multiprocessing import Process
 from pathlib import Path
 from typing import List, Optional, Union
 
-from .helpers.accelerometer import MeasurementsManager
+from .helpers.accelerometer import MeasurementsManager, close_inherited_serial_fds
 from .helpers.console_output import ConsoleOutput
 from .shaketune_config import ShakeTuneConfig
 
@@ -82,6 +82,9 @@ class ShakeTuneProcess:
     # This function is a simple wrapper to start the Shake&Tune process. It's needed in order to get the timeout
     # as a Timer in a thread INSIDE the Shake&Tune child process to not interfere with the main Klipper process
     def _shaketune_process_wrapper(self, graph_creator, filelist: List[Path], timeout) -> None:
+        # Runs in a forked child: release Klipper's inherited serial fds so we don't hold its
+        # exclusive MCU lock across a Klipper restart (see helpers/accelerometer.py).
+        close_inherited_serial_fds()
         if timeout is not None:
             # Add 5 seconds to the timeout for safety. The goal is to avoid the Timer to finish before the
             # Shake&Tune process is done in case we call the wait_for_completion() function that uses Klipper's reactor.
